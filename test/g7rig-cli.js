@@ -293,16 +293,42 @@ describe('g7-rig CLI', () => {
       io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
       (await run(['export-key'], io)).should.equal(0, err);
       const record = out;
-      const b = fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0B') });
-      io = makeIo('b', b.exec, record);
+      // a fake adapter: reports the new address once public-addr ran
+      let addr = 'B8:27:EB:00:00:0B';
+      const b = fakeExec();
+      const exec = async (cmd, args = [], opts = {}) => {
+        const line = [cmd, ...args].join(' ');
+        if (line === 'bluetoothctl show') {
+          b.calls.push({ line, opts });
+          return show(addr);
+        }
+        const m = / public-addr ([0-9A-F:]{17}) /.exec(` ${line} `);
+        if (m) [, addr] = m;
+        return b.exec(cmd, args, opts);
+      };
+      io = makeIo('b', exec, record);
       (await run(['import-key'], io)).should.equal(0, err);
       fs.readFileSync(path.join(tmp, 'b', 'g7-central'), 'utf8').should.containEql('B8:27:EB:00:00:0A');
       const lines = b.calls.map((c) => c.line);
-      const at = (l) => lines.indexOf(l);
+      // btmgmt hangs without a terminal (as under sudo/ssh/systemd): it runs inside script(1)
+      const at = (l) => lines.findIndex((x) => x === `script -qec ${l} /dev/null`);
       at('btmgmt --index 0 power off').should.be.above(-1);
       at('btmgmt --index 0 public-addr B8:27:EB:00:00:0A').should.be.above(at('btmgmt --index 0 power off'));
-      at('systemctl restart bluetooth').should.be.above(at('btmgmt --index 0 public-addr B8:27:EB:00:00:0A'));
-      at('systemctl start lookout').should.be.above(at('systemctl restart bluetooth'));
+      lines.indexOf('systemctl restart bluetooth').should.be.above(at('btmgmt --index 0 public-addr B8:27:EB:00:00:0A'));
+      lines.indexOf('systemctl start lookout').should.be.above(lines.indexOf('systemctl restart bluetooth'));
+      lines.filter((l) => l.startsWith('btmgmt')).should.eql([]); // never bare
+      b.calls.filter((c) => c.line.startsWith('script')).forEach((c) => c.opts.timeoutMs.should.be.below(60000));
+    });
+
+    it('import-key fails loudly if the adapter keeps its old address', async () => {
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      const record = out;
+      const b = fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0B') });
+      io = makeIo('b', b.exec, record);
+      (await run(['import-key'], io)).should.not.equal(0);
+      err.should.match(/could not set the Bluetooth address/);
+      b.calls.map((c) => c.line).should.containEql('systemctl start lookout'); // Lookout still restarted
     });
 
     it('import-key leaves Bluetooth alone when the address already matches', async () => {
@@ -312,7 +338,7 @@ describe('g7-rig CLI', () => {
       const b = fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') });
       io = makeIo('b', b.exec, record);
       (await run(['import-key'], io)).should.equal(0, err);
-      b.calls.filter((c) => c.line.startsWith('btmgmt')).should.eql([]);
+      b.calls.filter((c) => c.line.includes('btmgmt')).should.eql([]);
     });
   });
 

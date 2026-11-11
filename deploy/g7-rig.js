@@ -194,11 +194,20 @@ const currentAdapter = async (io) => central.adapterAddress((await io.exec('blue
 // Give this collector's adapter the shared address (the sensor only accepts
 // the key from the address of the collector that paired). Lookout must be
 // stopped; BlueZ is restarted so it picks the new address up.
+// btmgmt hangs when it has no terminal (as under sudo over ssh, or systemd):
+// run it inside script(1), with a time limit, and check the result separately.
+const btmgmt = (io, args) => {
+  const cmd = `btmgmt ${args.join(' ')}`;
+  return io.exec('script', ['-qec', cmd, '/dev/null'], { timeoutMs: 20000 });
+};
+
 const applyCentral = async (io, mac) => {
-  await mustRun(io, 'btmgmt', ['--index', '0', 'power', 'off'], 'powering Bluetooth off');
-  await mustRun(io, 'btmgmt', ['--index', '0', 'public-addr', mac], 'setting the Bluetooth address');
+  await btmgmt(io, ['--index', '0', 'power', 'off']);
+  await btmgmt(io, ['--index', '0', 'public-addr', mac]);
   await mustRun(io, 'systemctl', ['restart', 'bluetooth'], 'restarting bluetooth');
-  await io.exec('btmgmt', ['--index', '0', 'power', 'on']);
+  await btmgmt(io, ['--index', '0', 'power', 'on']);
+  const now = await currentAdapter(io);
+  if (now !== mac) throw fail(`could not set the Bluetooth address to ${mac} (it is ${now || 'unknown'})`);
 };
 
 // Read-only card (overlayroot): the card itself is mounted read-only here.
