@@ -27,7 +27,11 @@ install -d -o root -g root -m 755 /usr/local/lib/g7rig
 install -o root -g root -m 644 "$DIR"/lib/g7rig/*.js /usr/local/lib/g7rig/
 install -o root -g root -m 755 "$HERE/g7-rig.js" /usr/local/sbin/g7-rig.js
 install -o root -g root -m 755 "$HERE/g7-rig-remote.sh" /usr/local/sbin/g7-rig-remote
+# shared Bluetooth address (/etc/g7-central, written by g7-rig import-key)
+install -o root -g root -m 755 "$HERE/g7-central-apply.sh" /usr/local/sbin/g7-central-apply
+install -m 644 "$HERE/systemd/g7-central.service" /etc/systemd/system/g7-central.service
 systemctl daemon-reload
+systemctl enable g7-central.service >/dev/null 2>&1 || true
 systemctl restart bluetooth
 if [ "${1:-}" = "--enable" ]; then systemctl enable --now lookout; fi
 echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-new-sensor, g7-rig"

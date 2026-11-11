@@ -73,6 +73,7 @@ describe('g7-rig CLI', () => {
         G7RIG_STORAGE: path.join(tmp, name, 'storage'),
         G7RIG_ENV: path.join(tmp, name, 'lookout.env'),
         G7RIG_CACHE: path.join(tmp, name, 'cache'),
+        G7RIG_CENTRAL: path.join(tmp, name, 'g7-central'),
       },
       readStdin: async () => stdin,
       stdout: (s) => { out += s; },
@@ -129,6 +130,7 @@ describe('g7-rig CLI', () => {
         key_fingerprint: fingerprint(KEY),
         session_start: '2026-11-05T07:55:00.000Z',
         session_length_s: null,
+        central: '00:00:00:00:00:01',
       },
       last_reading: { time: '2026-11-10T11:55:00.000Z', glucose: 125, trend: 10 },
       last_heard: { time: '2026-11-10T11:59:30.000Z', rssi: -71 },
@@ -258,13 +260,69 @@ describe('g7-rig CLI', () => {
     should(lower).be.ok();
   });
 
+  describe('the central Bluetooth address (the sensor only accepts the key from it)', () => {
+    const show = (mac) => ({ code: 0, stdout: `Controller ${mac} (public)\n\tPowered: yes\n`, stderr: '' });
+
+    it('status reports the adapter address as sensor.central', async () => {
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
+      (await run(['status'], io)).should.equal(0, err);
+      JSON.parse(out).sensor.central.should.equal('B8:27:EB:00:00:0A');
+    });
+
+    it('export-key includes the adapter address when none is configured', async () => {
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      JSON.parse(out).central.should.equal('B8:27:EB:00:00:0A');
+    });
+
+    it('export-key exports the address the adapter presents, not a stale file', async () => {
+      fs.writeFileSync(path.join(tmp, 'a', 'g7-central'), 'B8:27:EB:00:00:0C\n');
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      JSON.parse(out).central.should.equal('B8:27:EB:00:00:0A');
+    });
+
+    it('export-key falls back to the configured address when Bluetooth cannot be asked', async () => {
+      fs.writeFileSync(path.join(tmp, 'a', 'g7-central'), 'B8:27:EB:00:00:0C\n');
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': { code: 1, stdout: '', stderr: 'no controller' } }).exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      JSON.parse(out).central.should.equal('B8:27:EB:00:00:0C');
+    });
+
+    it('import-key adopts another central address and applies it before Lookout starts', async () => {
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      const record = out;
+      const b = fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0B') });
+      io = makeIo('b', b.exec, record);
+      (await run(['import-key'], io)).should.equal(0, err);
+      fs.readFileSync(path.join(tmp, 'b', 'g7-central'), 'utf8').should.containEql('B8:27:EB:00:00:0A');
+      const lines = b.calls.map((c) => c.line);
+      const at = (l) => lines.indexOf(l);
+      at('btmgmt --index 0 power off').should.be.above(-1);
+      at('btmgmt --index 0 public-addr B8:27:EB:00:00:0A').should.be.above(at('btmgmt --index 0 power off'));
+      at('systemctl restart bluetooth').should.be.above(at('btmgmt --index 0 public-addr B8:27:EB:00:00:0A'));
+      at('systemctl start lookout').should.be.above(at('systemctl restart bluetooth'));
+    });
+
+    it('import-key leaves Bluetooth alone when the address already matches', async () => {
+      io = makeIo('a', fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') }).exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      const record = out;
+      const b = fakeExec({ 'bluetoothctl show': show('B8:27:EB:00:00:0A') });
+      io = makeIo('b', b.exec, record);
+      (await run(['import-key'], io)).should.equal(0, err);
+      b.calls.filter((c) => c.line.startsWith('btmgmt')).should.eql([]);
+    });
+  });
+
   it('export-key then import-key copies the key to another collector', async () => {
     const a = fakeExec();
     io = makeIo('a', a.exec);
     (await run(['export-key'], io)).should.equal(0, err);
     const record = JSON.parse(out);
     record.should.eql({
-      code: '1234', name: 'DXCMab', address: 'AA:BB:CC:DD:EE:FF', key: KEY,
+      code: '1234', name: 'DXCMab', address: 'AA:BB:CC:DD:EE:FF', key: KEY, central: '00:00:00:00:00:01',
     });
 
     const b = fakeExec();
@@ -274,7 +332,7 @@ describe('g7-rig CLI', () => {
     out.should.not.containEql(KEY);
     err.should.not.containEql(KEY);
 
-    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt')).should.eql([
+    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt') && l !== 'bluetoothctl show').should.eql([
       'systemctl stop lookout',
       'bluetoothctl remove 11:22:33:44:55:66',
       'bluetoothctl remove AA:BB:CC:DD:EE:FF',
@@ -295,7 +353,7 @@ describe('g7-rig CLI', () => {
     // fleet mode is switched on by import-key
     fs.readFileSync(envPath, 'utf8').should.equal(envFile('AA:BB:CC:DD:EE:FF').replace('--no_xdripaps', '--no_xdripaps --no_auto_pair'));
     (fs.statSync(envPath).mode & 0o777).should.equal(0o600); // eslint-disable-line no-bitwise
-    fs.readdirSync(path.join(tmp, 'b')).sort().should.eql(['lookout.env', 'storage']);
+    fs.readdirSync(path.join(tmp, 'b')).sort().should.eql(['g7-central', 'lookout.env', 'storage']);
 
     // b now reports the same sensor as a
     io = makeIo('b', fakeExec().exec);
@@ -334,7 +392,7 @@ describe('g7-rig CLI', () => {
     err.should.match(/medical/);
     io = makeIo('b', b.exec);
     (await run(['pair', '1234', 'DXCMab'], io)).should.equal(3);
-    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt')).should.eql([]);
+    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt') && l !== 'bluetoothctl show').should.eql([]);
   });
 
   it('pair runs g7-new-sensor, records the request and restarts Lookout', async () => {
@@ -342,7 +400,7 @@ describe('g7-rig CLI', () => {
     io = makeIo('b', b.exec);
     (await run(['pair', '4321', 'DXCMcd'], io)).should.equal(0, err);
     JSON.parse(out).should.eql({ ok: true });
-    const lines = b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt'));
+    const lines = b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt') && l !== 'bluetoothctl show');
     lines.should.eql(['/usr/local/sbin/g7-new-sensor 4321 DXCMcd', 'systemctl restart lookout']);
     const stored = await readStore(path.join(tmp, 'b', 'storage'), ['pairRequest', 'sensorName', 'keyRejected']);
     stored.should.eql({

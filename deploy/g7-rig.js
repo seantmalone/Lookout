@@ -22,8 +22,9 @@ const { spawn } = require('child_process');
 const { parseRemote } = require('../lib/g7rig/validate');
 const env = require('../lib/g7rig/env');
 const status = require('../lib/g7rig/status');
-const { makeDurable, fsyncDir } = require('../lib/g7rig/durable');
+const { makeDurable, fsyncDir, writeAtomic } = require('../lib/g7rig/durable');
 const { planSync, applySync } = require('../lib/g7rig/persist');
+const central = require('../lib/g7rig/central');
 const keyfile = require('../lib/g7rig/keyfile');
 const { parseScan } = require('../lib/g7rig/scan');
 
@@ -180,6 +181,25 @@ const mustRun = async (io, cmd, args, what) => {
 const printJson = (io, obj) => io.stdout(`${JSON.stringify(obj)}\n`);
 
 const cacheDir = (io) => io.env.G7RIG_CACHE || '/run/g7-rig';
+const centralPath = (io) => io.env.G7RIG_CENTRAL || central.FILE;
+const readCentral = (io) => {
+  try {
+    return central.parse(fs.readFileSync(centralPath(io), 'utf8'));
+  } catch (e) {
+    return null;
+  }
+};
+const currentAdapter = async (io) => central.adapterAddress((await io.exec('bluetoothctl', ['show'])).stdout);
+
+// Give this collector's adapter the shared address (the sensor only accepts
+// the key from the address of the collector that paired). Lookout must be
+// stopped; BlueZ is restarted so it picks the new address up.
+const applyCentral = async (io, mac) => {
+  await mustRun(io, 'btmgmt', ['--index', '0', 'power', 'off'], 'powering Bluetooth off');
+  await mustRun(io, 'btmgmt', ['--index', '0', 'public-addr', mac], 'setting the Bluetooth address');
+  await mustRun(io, 'systemctl', ['restart', 'bluetooth'], 'restarting bluetooth');
+  await io.exec('btmgmt', ['--index', '0', 'power', 'on']);
+};
 
 // Read-only card (overlayroot): the card itself is mounted read-only here.
 const lowerRoot = (io) => io.env.G7RIG_LOWER || '/media/root-ro';
@@ -243,7 +263,13 @@ const persistNow = async (io) => {
     const { sensorAddress } = env.readArgs(readEnv(io));
     const lower = lowerRoot(io);
     const ops = planSync({
-      upperRoot: '/', lowerRoot: lower, storageDir, envPath: envPath(io), btDir: BT_DIR, sensorAddress,
+      upperRoot: '/',
+      lowerRoot: lower,
+      storageDir,
+      envPath: envPath(io),
+      btDir: BT_DIR,
+      sensorAddress,
+      extraFiles: [centralPath(io)],
     });
     if (!ops.length) return { ok: true, readOnly: true, changed: 0 };
     await mustRun(io, 'mount', ['-o', 'remount,rw', lower], 'unlocking the card');
@@ -304,7 +330,7 @@ const commands = {
       io.exec('bluetoothctl', ['show']),
       recentErrorsCached(io),
     ]);
-    printJson(io, status.build({
+    const built = status.build({
       storage,
       envText: readEnv(io),
       lookoutActive: active.code === 0 && active.stdout.trim() === 'active',
@@ -314,7 +340,10 @@ const commands = {
       uptimeS: io.uptime(),
       version: lookoutVersion(dir),
       errors,
-    }));
+    });
+    // the address this collector presents to the sensor
+    built.sensor.central = bt.code === 0 ? central.adapterAddress(bt.stdout) : null;
+    printJson(io, built);
   },
 
   scan: async (io, [name]) => {
@@ -353,7 +382,9 @@ const commands = {
     const dir = await lookoutDir(io);
     const storage = await readItems((await openStorage(io, dir)).store);
     // The only place the key is ever printed.
-    printJson(io, keyfile.exportRecord({ storage, envText: readEnv(io) }));
+    // the address the sensor sees from this collector (and accepted the key from)
+    const shared = (await currentAdapter(io)) || readCentral(io);
+    printJson(io, keyfile.exportRecord({ storage, envText: readEnv(io), central: shared }));
   },
 
   'import-key': async (io) => {
@@ -385,6 +416,11 @@ const commands = {
       writeEnv(io, nextEnv);
       // eslint-disable-next-line no-restricted-syntax
       for (const mac of addresses) await io.exec('bluetoothctl', ['remove', mac]); // eslint-disable-line no-await-in-loop
+      if (record.central) {
+        writeAtomic(centralPath(io), central.format(record.central));
+        fs.chmodSync(centralPath(io), 0o644);
+        if ((await currentAdapter(io)) !== record.central) await applyCentral(io, record.central);
+      }
       await persistQuietly(io);
     } finally {
       await mustRun(io, 'systemctl', ['start', 'lookout'], 'starting lookout');

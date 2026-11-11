@@ -86,3 +86,27 @@ describe('g7-rig keyfile.validateImport', () => {
     }
   });
 });
+
+// The G7 ties its watch-slot key to the Bluetooth address of the central that
+// paired; collectors sharing a key must also share that address ("central").
+describe('g7-rig keyfile: the central Bluetooth address', () => {
+  const storage = { id: '1234', sensorName: 'DXCMab', sensorKey: { key: KEY, address: 'AA:BB:CC:DD:EE:FF' } };
+
+  it('exports the central address when known', () => {
+    keyfile.exportRecord({ storage, envText: ENV, central: 'B8:27:EB:00:00:01' })
+      .should.eql({ ...record(), central: 'B8:27:EB:00:00:01' });
+  });
+
+  it('round-trips the central address through validateImport', () => {
+    const out = keyfile.exportRecord({ storage, envText: ENV, central: 'B8:27:EB:00:00:01' });
+    keyfile.validateImport(JSON.parse(JSON.stringify(out))).central.should.equal('B8:27:EB:00:00:01');
+  });
+
+  it('accepts a record without one (older collectors)', () => {
+    keyfile.validateImport(record()).should.eql(record());
+  });
+
+  it('rejects a malformed central address', () => {
+    should.throws(() => keyfile.validateImport({ ...record(), central: 'nope' }), /bad central/);
+  });
+});

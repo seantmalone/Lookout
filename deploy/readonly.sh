@@ -10,7 +10,8 @@
 # Enabled: the card is mounted read-only under a RAM overlay (overlayroot);
 # everything written while running (logs, reading history, ...) lives in RAM
 # and is gone after a power cut. What must survive - Lookout's sensor items
-# (code, key, name, pairing state), /etc/lookout.env and the current sensor's
+# (code, key, name, pairing state), /etc/lookout.env, /etc/g7-central (the
+# shared Bluetooth address) and the current sensor's
 # Bluetooth bond - is copied onto the card by `g7-rig persist`, which unlocks
 # the card, writes those files crash-safely and locks it again. It runs:
 #  - from g7-rig pair / import-key, right after they change something
@@ -56,6 +57,7 @@ install_units() {
       echo "PathChanged=$dir/storage/$(printf %s "$key" | md5sum | cut -d' ' -f1)"
     done
     echo "PathChanged=/etc/lookout.env"
+    echo "PathChanged=/etc/g7-central"
     echo "Unit=g7-persist.service"
     echo
     echo "[Install]"

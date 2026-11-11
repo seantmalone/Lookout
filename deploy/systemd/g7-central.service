@@ -1,0 +1,13 @@
+[Unit]
+Description=Use the fleet's shared Bluetooth address for the G7 (/etc/g7-central)
+After=bluetooth.service
+Before=lookout.service
+ConditionPathExists=/etc/g7-central
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/g7-central-apply
+
+[Install]
+WantedBy=multi-user.target
