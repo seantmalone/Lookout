@@ -22,7 +22,12 @@ if [ ! -e /etc/lookout.env ]; then
   echo "created /etc/lookout.env from the example: edit it before starting"
 fi
 install -m 755 "$HERE/g7-new-sensor.sh" /usr/local/sbin/g7-new-sensor
+# g7-rig (fleet UI interface); access for the UI: deploy/setup-g7rig-access.sh
+install -d -o root -g root -m 755 /usr/local/lib/g7rig
+install -o root -g root -m 644 "$DIR"/lib/g7rig/*.js /usr/local/lib/g7rig/
+install -o root -g root -m 755 "$HERE/g7-rig.js" /usr/local/sbin/g7-rig.js
+install -o root -g root -m 755 "$HERE/g7-rig-remote.sh" /usr/local/sbin/g7-rig-remote
 systemctl daemon-reload
 systemctl restart bluetooth
 if [ "${1:-}" = "--enable" ]; then systemctl enable --now lookout; fi
-echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-new-sensor"
+echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-new-sensor, g7-rig"

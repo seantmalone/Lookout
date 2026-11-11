@@ -56,6 +56,32 @@ Pairing details live in xdrip-js:
 - write-without-response fragments
 - the Authentication subscription made before ExtraData
 
+## Fleet (g7-rig)
+
+Several collectors can share one sensor: one of them pairs, and the fleet UI
+copies the resulting key to the others. `install.sh` installs the collector
+side, `/usr/local/sbin/g7-rig.js` (its logic in `/usr/local/lib/g7rig`) and
+the forced-command wrapper `/usr/local/sbin/g7-rig-remote`.
+
+```sh
+sudo deploy/setup-g7rig-access.sh "$(cat ui-key.pub)"   # once per collector
+ssh g7rig@<collector> status                            # from the UI device
+```
+
+The setup script creates the user `g7rig`, whose key may only run
+`sudo g7-rig-remote`. The wrapper allows exactly `status`, `scan DXCMxx`,
+`pair NNNN DXCMxx`, `export-key` and `import-key`, and logs and rejects
+anything else (exit 2).
+
+- `status` prints JSON: the sensor, last reading, last heard, the pairing
+  state and recent errors. It shows only a fingerprint of the key (the
+  first 12 hex characters of its SHA-256), never the key.
+- `export-key` prints `{code, name, address, key}`. This is the only command
+  that outputs the key. `import-key` reads that record on stdin, installs it
+  and restarts Lookout.
+- `pair` and `import-key` refuse (exit 3) if `LOOKOUT_ARGS` selects the
+  medical slot (`--force_medical_slot`, `--alternate`).
+
 ## Watching it
 
 ```sh
