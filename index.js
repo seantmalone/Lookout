@@ -45,7 +45,7 @@ const argv = yargs
   })
   .option('sensor_address', {
     string: true,
-    describe: 'Only connect to the G7 with this Bluetooth address (e.g. a lab simulator)',
+    describe: 'Only connect to the G7 with this Bluetooth address (never pair with other sensors nearby)',
     default: '',
   })
   .option('read_only', {
