@@ -1346,6 +1346,9 @@ module.exports = async (options, storage, client, fakeMeter) => {
         txFirmware = m.data.firmwareVersion;
         if (m.data.sessionLengthSeconds > 0) {
           txSessionLengthSeconds = m.data.sessionLengthSeconds;
+          // for g7-rig status (the UI's Sensor screen: day N of M, grace)
+          await storage.setItem('sessionLengthSeconds', txSessionLengthSeconds)
+            .catch((err) => { error(`Unable to store sessionLengthSeconds: ${err}`); });
         }
         log('Version message:\n%O', m.data);
       } else if (m.msg === 'sawTransmitter') {
