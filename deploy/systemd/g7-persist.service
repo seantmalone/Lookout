@@ -1,0 +1,11 @@
+[Unit]
+Description=Save sensor data to the read-only SD card (g7-rig persist)
+After=lookout.service
+
+[Service]
+Type=oneshot
+# let Lookout / BlueZ finish writing the pairing (key, bond) first
+ExecStartPre=/bin/sleep 10
+ExecStart=@NODE_BIN@/node /usr/local/sbin/g7-rig.js persist
+Nice=19
+IOSchedulingClass=idle

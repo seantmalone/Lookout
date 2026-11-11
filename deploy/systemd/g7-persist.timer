@@ -1,0 +1,9 @@
+[Unit]
+Description=Backstop for g7-persist.path (save sensor data to the read-only SD card)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

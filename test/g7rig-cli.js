@@ -51,6 +51,7 @@ const fakeExec = (overrides = {}) => {
     if (line === 'systemctl show lookout -p WorkingDirectory --value') return { code: 0, stdout: `${ROOT}\n`, stderr: '' };
     if (line === 'systemctl is-active lookout') return { code: 0, stdout: 'active\n', stderr: '' };
     if (line === 'bluetoothctl show') return { code: 0, stdout: 'Controller 00:00:00:00:00:01 (public)\n\tPowered: yes\n', stderr: '' };
+    if (line.startsWith('findmnt -no OPTIONS')) return { code: 0, stdout: 'ro,relatime\n', stderr: '' };
     if (line.startsWith('journalctl')) return { code: 0, stdout: 'got glucose\nError: sample failure\nuploaded SGV\n', stderr: '' };
     return { code: 0, stdout: '', stderr: '' };
   };
@@ -166,6 +167,97 @@ describe('g7-rig CLI', () => {
     a.calls.filter((c) => c.line.startsWith('journalctl')).length.should.equal(2);
   });
 
+  it('persist does nothing when the card is not read-only', async () => {
+    const a = fakeExec({ 'findmnt -no FSTYPE /': { code: 0, stdout: 'ext4\n', stderr: '' } });
+    io = makeIo('a', a.exec);
+    (await run(['persist'], io)).should.equal(0, err);
+    JSON.parse(out).should.eql({ ok: true, readOnly: false, changed: 0 });
+    a.calls.filter((c) => c.line.startsWith('mount')).should.eql([]);
+  });
+
+  it('persist copies the sensor items to the read-only card, then relocks it', async () => {
+    const lower = path.join(tmp, 'card');
+    const a = fakeExec({
+      'findmnt -no FSTYPE /': { code: 0, stdout: 'overlay\n', stderr: '' },
+      [`findmnt -no TARGET ${lower}`]: { code: 0, stdout: `${lower}\n`, stderr: '' },
+    });
+    io = makeIo('a', a.exec);
+    io.env.G7RIG_LOWER = lower;
+    (await run(['persist'], io)).should.equal(0, err);
+    const res = JSON.parse(out);
+    res.readOnly.should.equal(true);
+    res.changed.should.be.above(0);
+    const lines = a.calls.map((c) => c.line).filter((l) => l.startsWith('mount') || l === 'sync');
+    lines.should.eql([`mount -o remount,rw ${lower}`, 'sync', `mount -o remount,ro ${lower}`]);
+    const cardStorage = path.join(lower, tmp, 'a', 'storage');
+    fs.readdirSync(cardStorage).length.should.be.above(0);
+
+    // second run: nothing to write, the card is not unlocked at all
+    const b = fakeExec({
+      'findmnt -no FSTYPE /': { code: 0, stdout: 'overlay\n', stderr: '' },
+      [`findmnt -no TARGET ${lower}`]: { code: 0, stdout: `${lower}\n`, stderr: '' },
+    });
+    io = makeIo('a', b.exec);
+    io.env.G7RIG_LOWER = lower;
+    (await run(['persist'], io)).should.equal(0, err);
+    JSON.parse(out).changed.should.equal(0);
+    b.calls.filter((c) => c.line.startsWith('mount')).should.eql([]);
+  });
+
+  it('persist retries the relock until the card is read-only again', async () => {
+    const lower = path.join(tmp, 'card');
+    let tries = 0;
+    const a = fakeExec({
+      'findmnt -no FSTYPE /': { code: 0, stdout: 'overlay\n', stderr: '' },
+      [`findmnt -no TARGET ${lower}`]: { code: 0, stdout: `${lower}\n`, stderr: '' },
+    });
+    const exec = async (cmd, args = [], opts = {}) => {
+      const line = [cmd, ...args].join(' ');
+      if (line === `mount -o remount,ro ${lower}`) {
+        tries += 1;
+        a.calls.push({ line, opts });
+        return tries < 3 ? { code: 32, stdout: '', stderr: 'mount point is busy' } : { code: 0, stdout: '', stderr: '' };
+      }
+      if (line === `findmnt -no OPTIONS ${lower}`) return { code: 0, stdout: tries >= 3 ? 'ro,relatime\n' : 'rw,relatime\n', stderr: '' };
+      return a.exec(cmd, args, opts);
+    };
+    io = makeIo('a', exec);
+    io.env.G7RIG_LOWER = lower;
+    io.sleep = async () => {};
+    (await run(['persist'], io)).should.equal(0, err);
+    tries.should.equal(3);
+  });
+
+  it('persist fails loudly if the card cannot be relocked', async () => {
+    const lower = path.join(tmp, 'card');
+    const a = fakeExec({
+      'findmnt -no FSTYPE /': { code: 0, stdout: 'overlay\n', stderr: '' },
+      [`findmnt -no TARGET ${lower}`]: { code: 0, stdout: `${lower}\n`, stderr: '' },
+      [`mount -o remount,ro ${lower}`]: { code: 32, stdout: '', stderr: 'mount point is busy' },
+      [`findmnt -no OPTIONS ${lower}`]: { code: 0, stdout: 'rw,relatime\n', stderr: '' },
+    });
+    io = makeIo('a', a.exec);
+    io.env.G7RIG_LOWER = lower;
+    io.sleep = async () => {};
+    (await run(['persist'], io)).should.not.equal(0);
+    err.should.match(/still writable/);
+  });
+
+  it('persist relocks the card even when copying fails', async () => {
+    const lower = path.join(tmp, 'card');
+    fs.writeFileSync(path.join(tmp, 'card-is-a-file'), 'x');
+    const a = fakeExec({
+      'findmnt -no FSTYPE /': { code: 0, stdout: 'overlay\n', stderr: '' },
+      [`findmnt -no TARGET ${path.join(tmp, 'card-is-a-file')}`]: { code: 0, stdout: 'x\n', stderr: '' },
+    });
+    io = makeIo('a', a.exec);
+    io.env.G7RIG_LOWER = path.join(tmp, 'card-is-a-file');
+    (await run(['persist'], io)).should.not.equal(0);
+    a.calls.map((c) => c.line).filter((l) => l.startsWith('mount')).pop()
+      .should.equal(`mount -o remount,ro ${path.join(tmp, 'card-is-a-file')}`);
+    should(lower).be.ok();
+  });
+
   it('export-key then import-key copies the key to another collector', async () => {
     const a = fakeExec();
     io = makeIo('a', a.exec);
@@ -182,7 +274,7 @@ describe('g7-rig CLI', () => {
     out.should.not.containEql(KEY);
     err.should.not.containEql(KEY);
 
-    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show')).should.eql([
+    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt')).should.eql([
       'systemctl stop lookout',
       'bluetoothctl remove 11:22:33:44:55:66',
       'bluetoothctl remove AA:BB:CC:DD:EE:FF',
@@ -242,7 +334,7 @@ describe('g7-rig CLI', () => {
     err.should.match(/medical/);
     io = makeIo('b', b.exec);
     (await run(['pair', '1234', 'DXCMab'], io)).should.equal(3);
-    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show')).should.eql([]);
+    b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt')).should.eql([]);
   });
 
   it('pair runs g7-new-sensor, records the request and restarts Lookout', async () => {
@@ -250,7 +342,7 @@ describe('g7-rig CLI', () => {
     io = makeIo('b', b.exec);
     (await run(['pair', '4321', 'DXCMcd'], io)).should.equal(0, err);
     JSON.parse(out).should.eql({ ok: true });
-    const lines = b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show'));
+    const lines = b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt'));
     lines.should.eql(['/usr/local/sbin/g7-new-sensor 4321 DXCMcd', 'systemctl restart lookout']);
     const stored = await readStore(path.join(tmp, 'b', 'storage'), ['pairRequest', 'sensorName', 'keyRejected']);
     stored.should.eql({

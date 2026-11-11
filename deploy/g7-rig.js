@@ -23,6 +23,7 @@ const { parseRemote } = require('../lib/g7rig/validate');
 const env = require('../lib/g7rig/env');
 const status = require('../lib/g7rig/status');
 const { makeDurable, fsyncDir } = require('../lib/g7rig/durable');
+const { planSync, applySync } = require('../lib/g7rig/persist');
 const keyfile = require('../lib/g7rig/keyfile');
 const { parseScan } = require('../lib/g7rig/scan');
 
@@ -178,10 +179,95 @@ const mustRun = async (io, cmd, args, what) => {
 
 const printJson = (io, obj) => io.stdout(`${JSON.stringify(obj)}\n`);
 
+const cacheDir = (io) => io.env.G7RIG_CACHE || '/run/g7-rig';
+
+// Read-only card (overlayroot): the card itself is mounted read-only here.
+const lowerRoot = (io) => io.env.G7RIG_LOWER || '/media/root-ro';
+const BT_DIR = '/var/lib/bluetooth';
+
+const readOnlyRoot = async (io) => {
+  const root = await io.exec('findmnt', ['-no', 'FSTYPE', '/']);
+  if (root.code !== 0 || root.stdout.trim() !== 'overlay') return false;
+  const lower = await io.exec('findmnt', ['-no', 'TARGET', lowerRoot(io)]);
+  return lower.code === 0 && lower.stdout.trim() !== '';
+};
+
+// one persist at a time (the path unit and import-key may overlap)
+const withLock = async (io, fn) => {
+  const lock = path.join(cacheDir(io), 'persist.lock');
+  fs.mkdirSync(cacheDir(io), { recursive: true, mode: 0o700 });
+  for (let i = 0; ; i += 1) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (e) {
+      let age = 0;
+      try {
+        age = Date.now() - fs.statSync(lock).mtimeMs;
+      } catch (e2) {
+        age = 0;
+      }
+      if (age > 120000) fs.rmSync(lock, { recursive: true, force: true }); // left by a crash
+      else if (i > 300) throw fail('another persist is still running');
+      await new Promise((r) => { setTimeout(r, 100); }); // eslint-disable-line no-await-in-loop
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+};
+
+// Make the card read-only again, retrying: a remount right after writing can
+// briefly fail with "mount point is busy". Verified against the mount table.
+const relock = async (io, lower) => {
+  const sleep = io.sleep || ((ms) => new Promise((r) => { setTimeout(r, ms); }));
+  for (let i = 0; i < 10; i += 1) {
+    await io.exec('sync', []); // eslint-disable-line no-await-in-loop
+    await io.exec('mount', ['-o', 'remount,ro', lower]); // eslint-disable-line no-await-in-loop
+    const opts = await io.exec('findmnt', ['-no', 'OPTIONS', lower]); // eslint-disable-line no-await-in-loop
+    if (opts.code === 0 && opts.stdout.trim().split(',')[0] === 'ro') return;
+    await sleep(1000); // eslint-disable-line no-await-in-loop
+  }
+  throw fail(`the card (${lower}) is still writable after 10 tries to relock it`);
+};
+
+// Copy what must survive a power cut onto the read-only card (see persist.js).
+const persistNow = async (io) => {
+  if (!(await readOnlyRoot(io))) return { ok: true, readOnly: false, changed: 0 };
+  return withLock(io, async () => {
+    const dir = await lookoutDir(io);
+    const storageDir = io.env.G7RIG_STORAGE || (dir && path.join(dir, 'storage'));
+    if (!storageDir) throw fail('Lookout storage not found');
+    const { sensorAddress } = env.readArgs(readEnv(io));
+    const lower = lowerRoot(io);
+    const ops = planSync({
+      upperRoot: '/', lowerRoot: lower, storageDir, envPath: envPath(io), btDir: BT_DIR, sensorAddress,
+    });
+    if (!ops.length) return { ok: true, readOnly: true, changed: 0 };
+    await mustRun(io, 'mount', ['-o', 'remount,rw', lower], 'unlocking the card');
+    try {
+      applySync(ops, { lowerRoot: lower, upperRoot: '/' });
+    } finally {
+      await relock(io, lower);
+    }
+    return { ok: true, readOnly: true, changed: ops.length };
+  });
+};
+
+// after pair / import-key: best effort (the path unit retries on the next change)
+const persistQuietly = async (io) => {
+  try {
+    await persistNow(io);
+  } catch (e) {
+    io.stderr(`warning: could not save to the read-only card: ${e.message}\n`);
+  }
+};
+
 // Reading the journal costs a Pi Zero ~1.5 s of CPU, and the UI asks for a
 // status every minute: keep the recent errors for ERRORS_TTL_MS in /run.
 const ERRORS_TTL_MS = 5 * 60 * 1000;
-const cacheDir = (io) => io.env.G7RIG_CACHE || '/run/g7-rig';
 
 const recentErrorsCached = async (io) => {
   const file = path.join(cacheDir(io), 'errors.json');
@@ -205,6 +291,11 @@ const recentErrorsCached = async (io) => {
 };
 
 const commands = {
+  // local only (not allowed through g7-rig-remote): run by g7-persist.service
+  persist: async (io) => {
+    printJson(io, await persistNow(io));
+  },
+
   status: async (io) => {
     const dir = await lookoutDir(io);
     const storage = await readItems((await openStorage(io, dir)).store);
@@ -253,6 +344,7 @@ const commands = {
     const dir = await lookoutDir(io);
     const storage = await openStorage(io, dir);
     await writeItems(io, storage, { pairRequest: { code, name, at: io.now() }, sensorName: name }, ['keyRejected']);
+    await persistQuietly(io);
     await mustRun(io, 'systemctl', ['restart', 'lookout'], 'restarting lookout');
     printJson(io, { ok: true });
   },
@@ -293,6 +385,7 @@ const commands = {
       writeEnv(io, nextEnv);
       // eslint-disable-next-line no-restricted-syntax
       for (const mac of addresses) await io.exec('bluetoothctl', ['remove', mac]); // eslint-disable-line no-await-in-loop
+      await persistQuietly(io);
     } finally {
       await mustRun(io, 'systemctl', ['start', 'lookout'], 'starting lookout');
     }
@@ -303,7 +396,8 @@ const commands = {
 const run = async (argv, io) => {
   let parsed;
   try {
-    parsed = parseRemote(argv.join(' '));
+    // `persist` is local only: g7-rig-remote never passes it
+    parsed = argv.join(' ') === 'persist' ? { cmd: 'persist', args: [] } : parseRemote(argv.join(' '));
   } catch (e) {
     io.stderr('rejected\n');
     return 2;
