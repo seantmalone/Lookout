@@ -82,6 +82,32 @@ anything else (exit 2).
 - `pair` and `import-key` refuse (exit 3) if `LOOKOUT_ARGS` selects the
   medical slot (`--force_medical_slot`, `--alternate`).
 
+## Safe to unplug
+
+Collectors get moved around and some have no screen, so they must survive
+losing power at any moment.
+
+1. `sudo deploy/harden.sh`: logs in RAM, no unattended apt/man-db activity
+   (a power cut mid-upgrade can break dpkg), boot partition read-only,
+   automatic fsck at boot. Lookout and g7-rig already write their data
+   crash-safely (temp file, fsync, rename, fsync the directory).
+2. `sudo deploy/readonly.sh enable --reboot`: the whole SD card becomes
+   read-only (overlayroot); everything written while running goes to RAM.
+   What must survive is copied onto the card by `g7-rig persist`, which
+   unlocks the card, writes crash-safely and relocks it (verified):
+   - Lookout's sensor items (code, key, name, pairing state, session length)
+   - `/etc/lookout.env`
+   - the current sensor's Bluetooth bond (old sensors' bonds are dropped)
+
+   It runs after `g7-rig pair` / `import-key`, whenever one of those files
+   changes (`g7-persist.path`), and hourly (`g7-persist.timer`). The rest of
+   Lookout's storage (reading history etc.) is scratch: each boot starts
+   clean, and Nightscout keeps the history.
+
+   `sudo deploy/readonly.sh status` shows the state. To update software:
+   `sudo deploy/readonly.sh disable --reboot`, update, then
+   `sudo deploy/readonly.sh enable --reboot`.
+
 ## Watching it
 
 ```sh
