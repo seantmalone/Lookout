@@ -102,6 +102,11 @@ const argv = yargs
     alias: 'd',
     default: '/root/myopenaps',
   })
+  .option('no_auto_pair', {
+    boolean: true,
+    describe: 'Fleet mode: use the shared key; pair only when g7-rig pair asks',
+    default: false,
+  })
   .option('no_xdripaps', {
     boolean: true,
     describe: 'Do not post readings to a local OpenAPS xDripAPS server (127.0.0.1:5000)',
@@ -166,6 +171,7 @@ const options = {
   verbose: params.verbose,
   nightscout: !params.no_nightscout,
   xdripaps: !params.no_xdripaps,
+  no_auto_pair: params.no_auto_pair,
   min_lsr_pairs: params.min_lsr_pairs,
   max_lsr_pairs: params.max_lsr_pairs,
   max_lsr_pairs_age: params.max_lsr_pairs_age,

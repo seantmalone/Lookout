@@ -12,6 +12,7 @@ const calibration = require('./calibration');
 const sensorSession = require('./sensorSession');
 const rigHealth = require('./rigHealth');
 const displaySlot = require('./displaySlot');
+const fleetMode = require('./fleetMode');
 const { backfillRequest } = require('./backfillRequest');
 const { WORKER_EXEC_ARGV } = require('./workerArgs');
 const xDripAPS = require('./xDripAPS')();
@@ -1151,6 +1152,26 @@ module.exports = async (options, storage, client, fakeMeter) => {
     return pendingCalTime;
   };
 
+  let lastSeen = null;
+
+  const applyStorageChanges = async ({ set, remove }) => {
+    await storage.lock();
+    try {
+      // eslint-disable-next-line no-restricted-syntax
+      for (const [name, value] of Object.entries(set)) {
+        // eslint-disable-next-line no-await-in-loop
+        await storage.setItem(name, value).catch((err) => { error(`Unable to store ${name}: ${err}`); });
+      }
+      // eslint-disable-next-line no-restricted-syntax
+      for (const name of remove) {
+        // eslint-disable-next-line no-await-in-loop
+        await storage.delItem(name).catch((err) => { error(`Unable to remove ${name}: ${err}`); });
+      }
+    } finally {
+      await storage.unlock();
+    }
+  };
+
   const listenToTransmitter = async (id) => {
     if (!id) {
       error('Unable to listen to invalid Transmitter ID');
@@ -1170,6 +1191,19 @@ module.exports = async (options, storage, client, fakeMeter) => {
       // own Node flags: the launcher's tiny heap makes the G7 crypto ~2x slower
       const workerOptions = { execArgv: WORKER_EXEC_ARGV };
       const btChannel = options.alternate_bt_channel ? '1' : '0';
+      const plan = fleetMode.workerPlan({
+        noAutoPair: options.no_auto_pair,
+        sensorKey,
+        pairRequest: await storage.getItem('pairRequest'),
+      });
+      if (!plan.start) {
+        log(`Fleet mode: not connecting (${plan.reason}); checking again in 30 seconds`);
+        timerObj = setTimeout(() => listenToTransmitter(txId), 30000);
+        return;
+      }
+      if (options.no_auto_pair) {
+        log(`Fleet mode: ${plan.reason}${plan.allowPairing ? ' (pairing allowed)' : ''}`);
+      }
       const key = sensorKey?.key || '';
       const macAddress = sensorKey?.address || '';
 
@@ -1193,7 +1227,7 @@ module.exports = async (options, storage, client, fakeMeter) => {
       worker = cp.fork(
         `${__dirname}/transmitterWorker`,
         [id, btChannel, key, macAddress, displayType ? String(displayType) : '',
-          options.sensor_address || ''],
+          options.sensor_address || '', plan.allowPairing ? '1' : '0'],
         workerOptions,
       );
     }
@@ -1318,17 +1352,28 @@ module.exports = async (options, storage, client, fakeMeter) => {
         // increment failed reads counter so we know how many
         // times we saw the transmitter
         txFailedReads += 1;
+
+        // "last heard" for g7-rig status (rate-limited SD-card write)
+        const seen = {
+          time: Date.now(), rssi: m.data?.rssi ?? null, address: m.data?.address || null,
+        };
+        if (fleetMode.shouldStoreSeen(lastSeen, seen)) {
+          lastSeen = seen;
+          await storage.setItem('sensorSeen', seen)
+            .catch((err) => { error(`Unable to store sensorSeen: ${err}`); });
+        }
+      } else if (m.msg === 'pairingBlocked') {
+        error('The sensor did not accept our saved key, and fleet mode does not re-pair: '
+          + 'waiting for a new key from the UI (g7-rig import-key or pair)');
+        await applyStorageChanges(fleetMode.onPairingBlocked({ now: Date.now() }));
       } else if (m.msg === 'backfillData') {
         processBackfillData(m.data);
       } else if (m.msg === 'sensorKey') {
-        sensorKey = m.data;
-
-        await storage.lock();
-        await storage.setItem('sensorKey', m.data)
-          .catch((err) => {
-            error(`Unable to store sensorKey: ${err}`);
-          });
-        await storage.unlock();
+        const changes = fleetMode.onSensorKey({ data: m.data, noAutoPair: options.no_auto_pair });
+        if ('sensorKey' in changes.set) {
+          sensorKey = m.data;
+        }
+        await applyStorageChanges(changes);
       }
     });
 
