@@ -121,6 +121,12 @@ install_file() {
 }
 
 case "$ACTION" in
+  units)
+    # (re)install the persist units and the remount-fs drop-in on the running system
+    install_units
+    skip_remount_fs_when_readonly
+    exit 0
+    ;;
   install)
     [ $# -ge 3 ] || { echo "usage: $0 install SRC DST [MODE [OWNER:GROUP]]" >&2; exit 2; }
     install_file "$2" "$3" "${4:-644}" "${5:-root:root}"
