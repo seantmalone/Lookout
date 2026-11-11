@@ -32,6 +32,7 @@ relock() {
 # written from this staged copy.
 STAGE=$(mktemp -d /run/g7-update.XXXXXX)
 trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/src" "$STAGE/root"
 rsync -rlt --exclude=node_modules --exclude=/storage/ --exclude='/storage.*' --exclude=.git "$SRC/" "$STAGE/src/"
 PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote /usr/local/sbin/g7-new-sensor
   /usr/local/sbin/g7-central-apply /usr/local/lib/g7rig
