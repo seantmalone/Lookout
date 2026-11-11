@@ -2,7 +2,7 @@
 
 const should = require('should');
 
-const { readArgs, setSensorAddress } = require('../lib/g7rig/env');
+const { readArgs, setSensorAddress, ensureFlag } = require('../lib/g7rig/env');
 
 const ENV = [
   '# comment mentioning --force_medical_slot and --sensor_address 11:11:11:11:11:11',
@@ -64,6 +64,30 @@ describe('g7-rig env.readArgs', () => {
   it('flags medical options written with =value or in quotes', () => {
     readArgs('LOOKOUT_ARGS=--force_medical_slot=true\n').medical.should.equal(true);
     readArgs('LOOKOUT_ARGS="--alternate --display_type watch"\n').medical.should.equal(true);
+  });
+});
+
+describe('g7-rig env.ensureFlag', () => {
+  it('appends a missing flag to LOOKOUT_ARGS only', () => {
+    const out = ensureFlag(ENV, '--no_auto_pair');
+    out.should.equal(ENV.replace(
+      'LOOKOUT_ARGS=--openaps /home/pi/myopenaps --display_type watch --sensor_address AA:BB:CC:DD:EE:FF --no_xdripaps',
+      'LOOKOUT_ARGS=--openaps /home/pi/myopenaps --display_type watch --sensor_address AA:BB:CC:DD:EE:FF --no_xdripaps --no_auto_pair',
+    ));
+  });
+
+  it('leaves the text unchanged when the flag is there', () => {
+    const once = ensureFlag(ENV, '--no_auto_pair');
+    ensureFlag(once, '--no_auto_pair').should.equal(once);
+  });
+
+  it('adds a LOOKOUT_ARGS line when there is none', () => {
+    ensureFlag('A=1\n', '--no_auto_pair').should.equal('A=1\nLOOKOUT_ARGS=--no_auto_pair\n');
+  });
+
+  it('keeps quotes around LOOKOUT_ARGS', () => {
+    ensureFlag('LOOKOUT_ARGS="--display_type watch"\n', '--no_auto_pair')
+      .should.equal('LOOKOUT_ARGS="--display_type watch --no_auto_pair"\n');
   });
 });
 

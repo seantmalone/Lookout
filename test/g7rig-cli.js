@@ -186,7 +186,8 @@ describe('g7-rig CLI', () => {
     });
 
     const envPath = path.join(tmp, 'b', 'lookout.env');
-    fs.readFileSync(envPath, 'utf8').should.equal(envFile('AA:BB:CC:DD:EE:FF'));
+    // fleet mode is switched on by import-key
+    fs.readFileSync(envPath, 'utf8').should.equal(envFile('AA:BB:CC:DD:EE:FF').replace('--no_xdripaps', '--no_xdripaps --no_auto_pair'));
     (fs.statSync(envPath).mode & 0o777).should.equal(0o600); // eslint-disable-line no-bitwise
     fs.readdirSync(path.join(tmp, 'b')).sort().should.eql(['lookout.env', 'storage']);
 
@@ -243,6 +244,7 @@ describe('g7-rig CLI', () => {
       sensorName: 'DXCMcd',
       keyRejected: undefined,
     });
+    fs.readFileSync(path.join(tmp, 'b', 'lookout.env'), 'utf8').should.containEql('--no_auto_pair');
   });
 
   it('pair reports a g7-new-sensor failure and records nothing', async () => {
