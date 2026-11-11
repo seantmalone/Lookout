@@ -93,7 +93,7 @@ grep -q -- "--sensor_address $NEW" "$ENV" || die "could not update $ENV"
 echo "pinned Lookout to $NEW"
 
 sudo -u "$RUN_AS" env PATH="$NODE_PATH_DIR:$PATH" node -e '
-  const dir = process.argv[1]; const code = process.argv[2];
+  const dir = process.argv[1]; const code = process.argv[2]; const name = process.argv[3];
   (async () => {
     const store = require(dir + "/node_modules/node-persist");
     await store.init({ dir: dir + "/storage", forgiveParseErrors: true });
@@ -101,9 +101,10 @@ sudo -u "$RUN_AS" env PATH="$NODE_PATH_DIR:$PATH" node -e '
     await storage.setItem("sensorKey", null);
     await require(dir + "/calibration").clearCalibration(storage);
     await storage.setItem("id", code);
+    await storage.setItem("sensorName", name);
     console.log("stored new pairing code; cleared saved sensor key and calibration");
   })().catch((e) => { console.error(e); process.exit(1); });
-' "$DIR" "$CODE"
+' "$DIR" "$CODE" "$NAME"
 
 systemctl start lookout
 echo "lookout started: it pairs at the sensor's next 5-minute burst."
