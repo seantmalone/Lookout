@@ -3,6 +3,9 @@
 #   sudo deploy/readonly.sh status
 #   sudo deploy/readonly.sh enable  [--reboot]
 #   sudo deploy/readonly.sh disable [--reboot]    (e.g. to update software)
+#   sudo deploy/readonly.sh install SRC DST [MODE [OWNER:GROUP]]
+#        install one file into the running system AND onto the read-only card
+#        (unlocks the card, always relocks it, verified)
 #
 # Enabled: the card is mounted read-only under a RAM overlay (overlayroot);
 # everything written while running (logs, reading history, ...) lives in RAM
@@ -81,7 +84,46 @@ set_cmdline() {
   fi
 }
 
+LOWER=/media/root-ro
+
+relock() {
+  i=0
+  while [ $i -lt 10 ]; do
+    sync
+    mount -o remount,ro "$LOWER" 2>/dev/null || true
+    [ "$(findmnt -no OPTIONS "$LOWER" | cut -d, -f1)" = ro ] && return 0
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "ERROR: the card ($LOWER) is still writable" >&2
+  return 1
+}
+
+install_file() {
+  src=$1; dst=$2; mode=${3:-644}; owner=${4:-root:root}
+  [ -f "$src" ] || { echo "no such file: $src" >&2; exit 1; }
+  tmp=$(mktemp)
+  cp "$src" "$tmp"                      # src may be the same path as dst
+  install -D -m "$mode" -o "${owner%%:*}" -g "${owner##*:}" "$tmp" "$dst"
+  if overlay_active; then
+    trap 'relock' EXIT
+    mount -o remount,rw "$LOWER"
+    install -D -m "$mode" -o "${owner%%:*}" -g "${owner##*:}" "$tmp" "$LOWER$dst"
+    trap - EXIT
+    relock
+    cmp "$dst" "$LOWER$dst" >/dev/null && echo "installed $dst (running system and card)"
+  else
+    echo "installed $dst"
+  fi
+  rm -f "$tmp"
+}
+
 case "$ACTION" in
+  install)
+    [ $# -ge 3 ] || { echo "usage: $0 install SRC DST [MODE [OWNER:GROUP]]" >&2; exit 2; }
+    install_file "$2" "$3" "${4:-644}" "${5:-root:root}"
+    exit 0
+    ;;
   status)
     if overlay_active; then echo "card: read-only (RAM overlay active)"; else echo "card: writable"; fi
     if overlay_configured; then echo "next boot: read-only"; else echo "next boot: writable"; fi
@@ -109,7 +151,7 @@ case "$ACTION" in
     echo "writable card configured: active after the next reboot"
     ;;
   *)
-    echo "usage: $0 status | enable [--reboot] | disable [--reboot]" >&2; exit 2;;
+    echo "usage: $0 status | enable [--reboot] | disable [--reboot] | install SRC DST [MODE [OWNER:GROUP]]" >&2; exit 2;;
 esac
 
 if [ "$REBOOT" = --reboot ] && [ "$ACTION" != status ]; then
