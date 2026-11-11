@@ -10,7 +10,7 @@
 //   g7-rig.js import-key          read that record on stdin and install it
 //
 // Exit codes: 0 ok, 1 error, 2 rejected command, 3 refused (medical slot).
-// Test overrides: G7RIG_STORAGE (storage dir), G7RIG_ENV (env file).
+// Test overrides: G7RIG_STORAGE (storage dir), G7RIG_ENV (env file), G7RIG_CACHE (cache dir).
 
 const fs = require('fs');
 const os = require('os');
@@ -175,14 +175,40 @@ const mustRun = async (io, cmd, args, what) => {
 
 const printJson = (io, obj) => io.stdout(`${JSON.stringify(obj)}\n`);
 
+// Reading the journal costs a Pi Zero ~1.5 s of CPU, and the UI asks for a
+// status every minute: keep the recent errors for ERRORS_TTL_MS in /run.
+const ERRORS_TTL_MS = 5 * 60 * 1000;
+const cacheDir = (io) => io.env.G7RIG_CACHE || '/run/g7-rig';
+
+const recentErrorsCached = async (io) => {
+  const file = path.join(cacheDir(io), 'errors.json');
+  try {
+    const cached = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const age = io.now() - cached.at;
+    if (age >= 0 && age < ERRORS_TTL_MS && Array.isArray(cached.errors)) return cached.errors;
+  } catch (e) {
+    // no cache yet, or unreadable: read the journal
+  }
+  const journal = await io.exec('journalctl', ['-u', 'lookout', '-o', 'cat', '-n', '300', '--no-pager']);
+  const errors = journal.code === 0 ? status.recentErrors(journal.stdout) : [];
+  try {
+    fs.mkdirSync(cacheDir(io), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ at: io.now(), errors }), { mode: 0o600 });
+    fs.renameSync(`${file}.tmp`, file);
+  } catch (e) {
+    // best effort
+  }
+  return errors;
+};
+
 const commands = {
   status: async (io) => {
     const dir = await lookoutDir(io);
     const storage = await readItems((await openStorage(io, dir)).store);
-    const [active, bt, journal] = await Promise.all([
+    const [active, bt, errors] = await Promise.all([
       io.exec('systemctl', ['is-active', 'lookout']),
       io.exec('bluetoothctl', ['show']),
-      io.exec('journalctl', ['-u', 'lookout', '-o', 'cat', '-n', '300', '--no-pager']),
+      recentErrorsCached(io),
     ]);
     printJson(io, status.build({
       storage,
@@ -193,7 +219,7 @@ const commands = {
       host: io.hostname(),
       uptimeS: io.uptime(),
       version: lookoutVersion(dir),
-      errors: journal.code === 0 ? status.recentErrors(journal.stdout) : [],
+      errors,
     }));
   },
 

@@ -57,6 +57,16 @@ SHELLS.forEach((shell) => describe(`g7-rig-remote.sh (forced-command wrapper) un
     });
   });
 
+  it('runs g7-rig at the lowest CPU priority (never competes with Lookout or the UI)', () => {
+    fs.writeFileSync(path.join(tmp, 'nicecheck'), '#!/bin/sh\nprintf "NICE:%s\\n" "$(ps -o nice= -p $$ | tr -d \' \')"\n', { mode: 0o755 });
+    const env = {
+      PATH: `${tmp}:/usr/bin:/bin`, G7RIG_NODE: path.join(tmp, 'nicecheck'), SSH_ORIGINAL_COMMAND: 'status',
+    };
+    const r = spawnSync(shell, [SCRIPT], { env, encoding: 'utf8' });
+    r.status.should.equal(0, r.stderr);
+    Number(/^NICE:(-?\d+)$/m.exec(r.stdout)[1]).should.be.aboveOrEqual(19);
+  });
+
   it('passes stdin through to import-key', () => {
     const r = run('import-key', '{"x":1}');
     r.stdout.should.equal('ARG:/usr/local/sbin/g7-rig.js\nARG:import-key\n{"x":1}');

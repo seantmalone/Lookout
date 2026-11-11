@@ -19,4 +19,9 @@ case "$CMD" in
 esac
 # $CMD is unquoted on purpose: it is one of the forms above, split into words.
 # shellcheck disable=SC2086
-exec "$NODE" /usr/local/sbin/g7-rig.js $CMD
+# Lowest CPU (and, where available, idle I/O) priority: status is polled every
+# minute and must never take time from Lookout (Nice -15) or the UI (Nice 10).
+if command -v ionice >/dev/null 2>&1; then
+  exec nice -n 19 ionice -c 3 "$NODE" /usr/local/sbin/g7-rig.js $CMD
+fi
+exec nice -n 19 "$NODE" /usr/local/sbin/g7-rig.js $CMD

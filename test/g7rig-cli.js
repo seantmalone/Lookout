@@ -71,6 +71,7 @@ describe('g7-rig CLI', () => {
       env: {
         G7RIG_STORAGE: path.join(tmp, name, 'storage'),
         G7RIG_ENV: path.join(tmp, name, 'lookout.env'),
+        G7RIG_CACHE: path.join(tmp, name, 'cache'),
       },
       readStdin: async () => stdin,
       stdout: (s) => { out += s; },
@@ -150,6 +151,19 @@ describe('g7-rig CLI', () => {
     s.bluetooth_powered.should.equal(false);
     s.errors.should.eql([]);
     should(s.version).be.null();
+  });
+
+  it('status reads the journal at most every 5 minutes (cached errors)', async () => {
+    const a = fakeExec();
+    io = makeIo('a', a.exec);
+    (await run(['status'], io)).should.equal(0, err);
+    (await run(['status'], io)).should.equal(0, err);
+    JSON.parse(out.trim().split('\n').pop()).errors.should.eql(['Error: sample failure']);
+    a.calls.filter((c) => c.line.startsWith('journalctl')).length.should.equal(1);
+
+    io.now = () => NOW + 301 * 1000;
+    (await run(['status'], io)).should.equal(0, err);
+    a.calls.filter((c) => c.line.startsWith('journalctl')).length.should.equal(2);
   });
 
   it('export-key then import-key copies the key to another collector', async () => {

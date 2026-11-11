@@ -36,6 +36,9 @@ if ! id g7rig >/dev/null 2>&1; then
   useradd --system --create-home --shell /bin/sh g7rig
 fi
 usermod -p '*' g7rig
+# Keep g7rig's systemd user manager running: otherwise every SSH login (one a
+# minute from the UI) starts a fresh one, ~2.5 s of CPU on a Pi Zero.
+loginctl enable-linger g7rig 2>/dev/null || true
 HOME_DIR=$(getent passwd g7rig | cut -d: -f6)
 [ -n "$HOME_DIR" ] && [ -d "$HOME_DIR" ] || { echo "g7rig has no home directory" >&2; exit 1; }
 
