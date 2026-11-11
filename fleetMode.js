@@ -23,8 +23,9 @@ const onSensorKey = ({ data, noAutoPair }) => {
 
 const onPairingBlocked = ({ now }) => ({ set: { keyRejected: { at: now } }, remove: [] });
 
-// "Last heard": store a sighting at most every 10 s (an SD-card write each time).
-const SEEN_MIN_INTERVAL_MS = 10000;
+// "Last heard": store a sighting at most once a minute (each is a durable
+// SD-card write; the UI shows it in minutes).
+const SEEN_MIN_INTERVAL_MS = 60000;
 const shouldStoreSeen = (prev, next, minIntervalMs = SEEN_MIN_INTERVAL_MS) => {
   if (!prev) return true;
   if (prev.address !== next.address) return true;

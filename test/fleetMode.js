@@ -69,8 +69,8 @@ describe('fleetMode.shouldStoreSeen', () => {
   const seen = (time, address = 'AA:BB:CC:DD:EE:01') => ({ time, rssi: -70, address });
 
   it('stores the first sighting', () => { fleet.shouldStoreSeen(null, seen(0)).should.equal(true); });
-  it('skips sightings within 10 s', () => { fleet.shouldStoreSeen(seen(0), seen(9999)).should.equal(false); });
-  it('stores after 10 s', () => { fleet.shouldStoreSeen(seen(0), seen(10000)).should.equal(true); });
+  it('skips sightings within 60 s', () => { fleet.shouldStoreSeen(seen(0), seen(59999)).should.equal(false); });
+  it('stores after 60 s', () => { fleet.shouldStoreSeen(seen(0), seen(60000)).should.equal(true); });
   it('stores at once when the address changes', () => {
     fleet.shouldStoreSeen(seen(0), seen(1, 'AA:BB:CC:DD:EE:02')).should.equal(true);
   });

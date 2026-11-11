@@ -22,6 +22,7 @@ const { spawn } = require('child_process');
 const { parseRemote } = require('../lib/g7rig/validate');
 const env = require('../lib/g7rig/env');
 const status = require('../lib/g7rig/status');
+const { makeDurable, fsyncDir } = require('../lib/g7rig/durable');
 const keyfile = require('../lib/g7rig/keyfile');
 const { parseScan } = require('../lib/g7rig/scan');
 
@@ -103,6 +104,7 @@ const openStorage = async (io, dir) => {
     dir: storageDir, forgiveParseErrors: true, expiredInterval: false,
   });
   await store.init();
+  makeDurable(store); // crash-safe writes, as in Lookout
   return { store, storageDir };
 };
 
@@ -159,6 +161,7 @@ const writeEnv = (io, text) => {
   fs.chmodSync(tmp, 0o600);
   if (io.getuid() === 0) fs.chownSync(tmp, before.uid, before.gid);
   fs.renameSync(tmp, file);
+  fsyncDir(path.dirname(file)); // the rename itself survives a power cut
 };
 
 const refuseMedical = (envText) => {

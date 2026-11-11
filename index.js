@@ -9,6 +9,7 @@ const error = Debug('Lookout:error');
 
 const yargs = require('yargs');
 const storage = require('./storage');
+const { makeDurable } = require('./lib/g7rig/durable');
 const debugNamespaces = require('./debugNamespaces');
 const syncNS = require('./syncNS');
 const FakeMeter = require('./fakemeter');
@@ -214,6 +215,8 @@ const init = async () => {
   // not the calling directory
   try {
     await store.init({ dir: `${__dirname}/storage`, forgiveParseErrors: true });
+    // crash-safe writes: collectors get unplugged without a clean shutdown
+    makeDurable(store);
   } catch (e) {
     error('Storage Init Error: ', e);
   }
