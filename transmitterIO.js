@@ -23,7 +23,6 @@ const { postToLocalXdrip } = require('./rigOutputs');
 
 const FIVE_MINUTES = timing.cycleMs;
 const RESTART_LISTEN_TIME = timing.workerTimeoutMs;
-const PRE_TX_WAKUP_BUFFER = 0 * 1000;
 
 module.exports = async (options, storage, client, fakeMeter) => {
   let txId;
@@ -1364,8 +1363,8 @@ module.exports = async (options, storage, client, fakeMeter) => {
       // Time until the next 5-minute boundary since lastSuccessfulRead
       const timeUntilNextRead = (FIVE_MINUTES - (elapsedMs % FIVE_MINUTES)) % FIVE_MINUTES;
 
-      // Time until 1 minute BEFORE the next read
-      let timeUntilTarget = timeUntilNextRead - PRE_TX_WAKUP_BUFFER;
+      // Start the worker timing.preWakeMs before the next read
+      let timeUntilTarget = timeUntilNextRead - timing.preWakeMs;
 
       // Cannot wait until a time before now - nobody has invented a time machine
       if (timeUntilTarget < 0) {
