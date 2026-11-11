@@ -239,18 +239,21 @@ const withLock = async (io, fn) => {
   }
 };
 
+// "busy" right after many writes can last tens of seconds
+const RELOCK_TRIES = 60;
+
 // Make the card read-only again, retrying: a remount right after writing can
 // briefly fail with "mount point is busy". Verified against the mount table.
 const relock = async (io, lower) => {
   const sleep = io.sleep || ((ms) => new Promise((r) => { setTimeout(r, ms); }));
-  for (let i = 0; i < 10; i += 1) {
+  for (let i = 0; i < RELOCK_TRIES; i += 1) {
     await io.exec('sync', []); // eslint-disable-line no-await-in-loop
     await io.exec('mount', ['-o', 'remount,ro', lower]); // eslint-disable-line no-await-in-loop
     const opts = await io.exec('findmnt', ['-no', 'OPTIONS', lower]); // eslint-disable-line no-await-in-loop
     if (opts.code === 0 && opts.stdout.trim().split(',')[0] === 'ro') return;
     await sleep(1000); // eslint-disable-line no-await-in-loop
   }
-  throw fail(`the card (${lower}) is still writable after 10 tries to relock it`);
+  throw fail(`the card (${lower}) is still writable after ${RELOCK_TRIES} tries to relock it`);
 };
 
 // Copy what must survive a power cut onto the read-only card (see persist.js).

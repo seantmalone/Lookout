@@ -17,7 +17,7 @@ sh "$HERE/readonly.sh" units
 
 relock() {
   i=0
-  while [ $i -lt 10 ]; do
+  while [ $i -lt 60 ]; do              # "busy" right after many writes can last a while
     sync
     mount -o remount,ro "$L" 2>/dev/null || true
     [ "$(findmnt -no OPTIONS "$L" | cut -d, -f1)" = ro ] && return 0
@@ -27,26 +27,46 @@ relock() {
   return 1
 }
 
+# Stage everything in RAM first: reading through the overlay after changing
+# the card underneath it is undefined (overlayfs), so the card is only
+# written from this staged copy.
+STAGE=$(mktemp -d /run/g7-update.XXXXXX)
+trap 'rm -rf "$STAGE"' EXIT
+rsync -rlt --exclude=node_modules --exclude=/storage/ --exclude='/storage.*' --exclude=.git "$SRC/" "$STAGE/src/"
+PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote /usr/local/sbin/g7-new-sensor
+  /usr/local/sbin/g7-central-apply /usr/local/lib/g7rig
+  /etc/systemd/system/lookout.service /etc/systemd/system/lookout.service.d
+  /etc/systemd/system/bluetooth.service.d /etc/systemd/system/g7-central.service
+  /etc/systemd/system/g7-persist.service /etc/systemd/system/g7-persist.path
+  /etc/systemd/system/g7-persist.timer /etc/systemd/system/systemd-remount-fs.service.d
+  /etc/systemd/system/multi-user.target.wants/lookout.service
+  /etc/systemd/system/multi-user.target.wants/g7-central.service
+  /etc/systemd/system/multi-user.target.wants/g7-persist.path
+  /etc/systemd/system/timers.target.wants/g7-persist.timer"
+for p in $PATHS; do
+  if [ -e "$p" ] || [ -L "$p" ]; then cp -a --parents "$p" "$STAGE/root/"; fi
+done
+
 mount -o remount,rw "$L"
-trap relock EXIT
-# Lookout's code (not node_modules, not its data)
-rsync -rlt --exclude=node_modules --exclude=/storage/ --exclude='/storage.*' --exclude=.git "$SRC/" "$L$SRC/"
-# the files install.sh and readonly.sh manage, exactly as on the running system
-for p in /usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote /usr/local/sbin/g7-new-sensor \
-         /usr/local/sbin/g7-central-apply /usr/local/lib/g7rig \
-         /etc/systemd/system/lookout.service /etc/systemd/system/lookout.service.d \
-         /etc/systemd/system/bluetooth.service.d /etc/systemd/system/g7-central.service \
-         /etc/systemd/system/g7-persist.service /etc/systemd/system/g7-persist.path \
-         /etc/systemd/system/g7-persist.timer /etc/systemd/system/systemd-remount-fs.service.d \
-         /etc/systemd/system/multi-user.target.wants/lookout.service \
-         /etc/systemd/system/multi-user.target.wants/g7-central.service \
-         /etc/systemd/system/multi-user.target.wants/g7-persist.path \
-         /etc/systemd/system/timers.target.wants/g7-persist.timer; do
-  if [ -e "$p" ] || [ -L "$p" ]; then
+trap 'relock; rm -rf "$STAGE"' EXIT
+rsync -rlt "$STAGE/src/" "$L$SRC/"
+for p in $PATHS; do
+  if [ -e "$STAGE/root$p" ] || [ -L "$STAGE/root$p" ]; then
     rm -rf "$L$p"
-    cp -a --parents "$p" "$L/"
+    mkdir -p "$(dirname "$L$p")"
+    cp -a "$STAGE/root$p" "$L$p"
   fi
 done
 trap - EXIT
 relock
-echo "updated the running system and the card"
+# check: every staged file is on the card, byte for byte
+bad=0
+diff -rq "$STAGE/src" "$L$SRC" -x node_modules -x storage -x 'storage.*' -x .git >/dev/null 2>&1 || { echo "card differs: $SRC" >&2; bad=1; }
+for p in $PATHS; do
+  if [ -e "$STAGE/root$p" ] && ! diff -rq "$STAGE/root$p" "$L$p" >/dev/null 2>&1; then
+    echo "card differs: $p" >&2; bad=1
+  fi
+done
+rm -rf "$STAGE"
+[ $bad = 0 ] || exit 1
+echo "updated the running system and the card (verified)"

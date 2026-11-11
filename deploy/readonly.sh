@@ -90,7 +90,7 @@ LOWER=/media/root-ro
 
 relock() {
   i=0
-  while [ $i -lt 10 ]; do
+  while [ $i -lt 60 ]; do              # "busy" right after many writes can last a while
     sync
     mount -o remount,ro "$LOWER" 2>/dev/null || true
     [ "$(findmnt -no OPTIONS "$LOWER" | cut -d, -f1)" = ro ] && return 0
