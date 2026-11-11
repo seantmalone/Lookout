@@ -13,8 +13,16 @@ const workerPlan = ({ noAutoPair, sensorKey, pairRequest }) => {
 };
 
 // Storage changes for a 'sensorKey' message from the worker.
-const onSensorKey = ({ data, noAutoPair }) => {
-  if (hasKey(data)) return { set: { sensorKey: data }, remove: ['pairRequest', 'keyRejected'] };
+// pairRequest present: this key comes from a pairing g7-rig asked for, so record
+// when it was paired (the UI adopts a key paired after its own record).
+const onSensorKey = ({
+  data, noAutoPair, pairRequest = null, now = Date.now(),
+}) => {
+  if (hasKey(data)) {
+    const set = { sensorKey: data };
+    if (pairRequest) set.pairedAt = now;
+    return { set, remove: ['pairRequest', 'keyRejected'] };
+  }
   // An empty key means authentication failed. In a fleet keep the shared key:
   // the UI decides what to do (copy a newer key, or ask for a new pairing).
   if (noAutoPair) return { set: {}, remove: [] };

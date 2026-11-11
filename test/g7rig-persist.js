@@ -68,7 +68,7 @@ describe('g7-rig persist (read-only card)', () => {
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
   it('persists exactly the sensor items, not the reading history', () => {
-    PERSIST_KEYS.should.containDeep(['id', 'sensorKey', 'sensorName', 'pairRequest', 'keyRejected']);
+    PERSIST_KEYS.should.containDeep(['id', 'sensorKey', 'sensorName', 'pairRequest', 'keyRejected', 'pairedAt']);
     PERSIST_KEYS.should.not.containEql('glucoseHist');
   });
 

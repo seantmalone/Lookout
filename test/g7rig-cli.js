@@ -130,6 +130,7 @@ describe('g7-rig CLI', () => {
         key_fingerprint: fingerprint(KEY),
         session_start: '2026-11-05T07:55:00.000Z',
         session_length_s: null,
+        paired_at: null,
         central: '00:00:00:00:00:01',
       },
       last_reading: { time: '2026-11-10T11:55:00.000Z', glucose: 125, trend: 10 },

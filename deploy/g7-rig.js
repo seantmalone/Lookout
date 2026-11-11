@@ -427,6 +427,7 @@ const commands = {
         id: record.code,
         sensorKey: { key: record.key, address: record.address },
         sensorName: record.name,
+        ...(record.paired_at ? { pairedAt: Date.parse(record.paired_at) } : {}),
       }, ['pairRequest', 'keyRejected']);
       writeEnv(io, nextEnv);
       // eslint-disable-next-line no-restricted-syntax

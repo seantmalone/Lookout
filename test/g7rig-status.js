@@ -77,6 +77,7 @@ describe('g7-rig status.build', () => {
         key_fingerprint: status.fingerprint(KEY),
         session_start: '2026-11-05T07:55:00.000Z',
         session_length_s: null,
+        paired_at: null,
       },
       last_reading: { time: '2026-11-10T11:55:00.000Z', glucose: 125, trend: 10 },
       last_heard: { time: '2026-11-10T11:59:30.000Z', rssi: -71 },
@@ -132,6 +133,7 @@ describe('g7-rig status.build', () => {
       key_fingerprint: null,
       session_start: null,
       session_length_s: null,
+      paired_at: null,
     });
     should(s.last_reading).be.null();
     should(s.last_heard).be.null();
@@ -226,5 +228,16 @@ describe('g7-rig status.recentErrors', () => {
   it('returns [] for no input', () => {
     status.recentErrors('').should.eql([]);
     status.recentErrors(null).should.eql([]);
+  });
+});
+
+describe('g7-rig status: when the key was paired', () => {
+  it('reports sensor.paired_at from storage pairedAt', () => {
+    const s = base({ ...fullStorage(), pairedAt: Date.UTC(2026, 10, 11, 12, 0, 0) });
+    s.sensor.paired_at.should.equal('2026-11-11T12:00:00.000Z');
+  });
+
+  it('is null when unknown', () => {
+    should(base(fullStorage()).sensor.paired_at).be.null();
   });
 });

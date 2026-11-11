@@ -58,6 +58,22 @@ describe('fleetMode.onSensorKey', () => {
   });
 });
 
+describe('fleetMode.onSensorKey: when the key was paired', () => {
+  it('records the pairing time when the key comes from a requested pairing', () => {
+    fleet.onSensorKey({
+      data: KEY, noAutoPair: true, pairRequest: { code: '1234', at: 1 }, now: 5000,
+    }).should.eql({
+      set: { sensorKey: KEY, pairedAt: 5000 }, remove: ['pairRequest', 'keyRejected'],
+    });
+  });
+
+  it('does not touch the pairing time on an ordinary reconnect', () => {
+    fleet.onSensorKey({
+      data: KEY, noAutoPair: true, pairRequest: null, now: 5000,
+    }).set.should.not.have.property('pairedAt');
+  });
+});
+
 describe('fleetMode.onPairingBlocked', () => {
   it('records the rejection time', () => {
     fleet.onPairingBlocked({ now: 1000 })

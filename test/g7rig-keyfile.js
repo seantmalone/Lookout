@@ -110,3 +110,22 @@ describe('g7-rig keyfile: the central Bluetooth address', () => {
     should.throws(() => keyfile.validateImport({ ...record(), central: 'nope' }), /bad central/);
   });
 });
+
+describe('g7-rig keyfile: when the key was paired', () => {
+  const storage = {
+    id: '1234',
+    sensorName: 'DXCMab',
+    sensorKey: { key: KEY, address: 'AA:BB:CC:DD:EE:FF' },
+    pairedAt: Date.UTC(2026, 10, 11, 12, 0, 0),
+  };
+
+  it('exports paired_at as ISO time and imports it back', () => {
+    const out = keyfile.exportRecord({ storage, envText: ENV });
+    out.paired_at.should.equal('2026-11-11T12:00:00.000Z');
+    keyfile.validateImport(JSON.parse(JSON.stringify(out))).paired_at.should.equal('2026-11-11T12:00:00.000Z');
+  });
+
+  it('rejects a malformed paired_at', () => {
+    should.throws(() => keyfile.validateImport({ ...record(), paired_at: 'yesterday' }), /bad paired_at/);
+  });
+});

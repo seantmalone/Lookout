@@ -53,7 +53,7 @@ install_units() {
     echo "Description=Save sensor data to the read-only SD card when it changes"
     echo
     echo "[Path]"
-    for key in id sensorKey sensorName pairRequest keyRejected sessionLengthSeconds meterid; do
+    for key in id sensorKey sensorName pairRequest keyRejected sessionLengthSeconds meterid pairedAt; do
       echo "PathChanged=$dir/storage/$(printf %s "$key" | md5sum | cut -d' ' -f1)"
     done
     echo "PathChanged=/etc/lookout.env"

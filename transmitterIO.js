@@ -1374,7 +1374,12 @@ module.exports = async (options, storage, client, fakeMeter) => {
       } else if (m.msg === 'backfillData') {
         processBackfillData(m.data);
       } else if (m.msg === 'sensorKey') {
-        const changes = fleetMode.onSensorKey({ data: m.data, noAutoPair: options.no_auto_pair });
+        const changes = fleetMode.onSensorKey({
+          data: m.data,
+          noAutoPair: options.no_auto_pair,
+          pairRequest: await storage.getItem('pairRequest'),
+          now: Date.now(),
+        });
         if ('sensorKey' in changes.set) {
           sensorKey = m.data;
         }
