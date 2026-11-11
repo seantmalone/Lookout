@@ -57,3 +57,28 @@ describe('durable node-persist writes', () => {
     fs.readdirSync(path.join(dir, 'storage')).filter((f) => f.endsWith(TMP_SUFFIX)).should.eql([]);
   });
 });
+
+describe('durable writes through the module-level node-persist API (as Lookout uses it)', () => {
+  it('patches the default instance', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'durable-mod-'));
+    const fresh = path.join(dir, 'storage');
+    // a separate copy of the module, so the shared default instance is untouched
+    delete require.cache[require.resolve('node-persist')];
+    const mod = require('node-persist'); // eslint-disable-line global-require
+    await mod.init({ dir: fresh, forgiveParseErrors: true });
+    makeDurable(mod).should.be.ok();
+    const realRename = fs.renameSync;
+    let renames = 0;
+    fs.renameSync = (...a) => { renames += 1; return realRename(...a); };
+    try {
+      await mod.setItem('sensorKey', { key: 'k' });
+    } finally {
+      fs.renameSync = realRename;
+    }
+    renames.should.equal(1); // written via temp file + rename
+    fs.readdirSync(fresh).filter((f) => f.endsWith(TMP_SUFFIX)).should.eql([]);
+    JSON.parse(fs.readFileSync(path.join(fresh, fs.readdirSync(fresh)[0]), 'utf8')).value.should.eql({ key: 'k' });
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete require.cache[require.resolve('node-persist')];
+  });
+});
