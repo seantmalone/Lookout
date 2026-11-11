@@ -32,8 +32,15 @@ relock() {
 # written from this staged copy.
 STAGE=$(mktemp -d /run/g7-update.XXXXXX)
 trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/src" "$STAGE/root"
+mkdir -p "$STAGE/src" "$STAGE/root" "$STAGE/xdrip"
 rsync -rlt --exclude=node_modules --exclude=/storage/ --exclude='/storage.*' --exclude=.git "$SRC/" "$STAGE/src/"
+# xdrip-js, when Lookout uses a sibling checkout (node_modules/xdrip-js -> ../../xdrip-js)
+XDRIP=""
+if [ -L "$SRC/node_modules/xdrip-js" ]; then
+  XDRIP=$(readlink -f "$SRC/node_modules/xdrip-js")
+  [ -f "$XDRIP/package.json" ] && [ -d "$XDRIP/lib" ] || XDRIP=""
+fi
+[ -n "$XDRIP" ] && rsync -rlt --exclude=node_modules --exclude=.git "$XDRIP/" "$STAGE/xdrip/"
 PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote /usr/local/sbin/g7-new-sensor
   /usr/local/sbin/g7-central-apply /usr/local/lib/g7rig
   /etc/systemd/system/lookout.service /etc/systemd/system/lookout.service.d
@@ -51,6 +58,7 @@ done
 mount -o remount,rw "$L"
 trap 'relock; rm -rf "$STAGE"' EXIT
 rsync -rlt "$STAGE/src/" "$L$SRC/"
+[ -n "$XDRIP" ] && rsync -rlt "$STAGE/xdrip/" "$L$XDRIP/"
 for p in $PATHS; do
   if [ -e "$STAGE/root$p" ] || [ -L "$STAGE/root$p" ]; then
     rm -rf "$L$p"
@@ -63,6 +71,9 @@ relock
 # check: every staged file is on the card, byte for byte
 bad=0
 diff -rq "$STAGE/src" "$L$SRC" -x node_modules -x storage -x 'storage.*' -x .git >/dev/null 2>&1 || { echo "card differs: $SRC" >&2; bad=1; }
+if [ -n "$XDRIP" ]; then
+  diff -rq "$STAGE/xdrip" "$L$XDRIP" -x node_modules -x .git >/dev/null 2>&1 || { echo "card differs: $XDRIP" >&2; bad=1; }
+fi
 for p in $PATHS; do
   if [ -e "$STAGE/root$p" ] && ! diff -rq "$STAGE/root$p" "$L$p" >/dev/null 2>&1; then
     echo "card differs: $p" >&2; bad=1
