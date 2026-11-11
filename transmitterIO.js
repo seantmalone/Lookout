@@ -376,7 +376,9 @@ module.exports = async (options, storage, client, fakeMeter) => {
     }
 
     const toNS = options.nightscout && !options.read_only;
-    xDripAPS.post(sgv, postToLocalXdrip(options, sendToXdrip), toNS);
+    xDripAPS.post(sgv, postToLocalXdrip(options, sendToXdrip), toNS, {
+      dedupe: options.no_auto_pair, // fleet: another collector may have sent it
+    });
   };
 
   const sendCGMStatus = async (sgv, bgChecks) => {

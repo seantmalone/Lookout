@@ -7,6 +7,7 @@ const requestPromise = require('request-promise-native');
 const moment = require('moment');
 
 const Debug = require('debug');
+const nsDedupe = require('./nsDedupe');
 
 const log = Debug('xDripAPS:log');
 const error = Debug('xDripAPS:error');
@@ -91,6 +92,25 @@ const postToXdrip = (entry) => {
     } else {
       log(`uploaded SGV to xDripAPS, statusCode = ${response.statusCode}`);
     }
+  });
+};
+
+const nsAuth = () => {
+  const secret = process.env.API_SECRET || '';
+  return secret.startsWith('token=')
+    ? { query: secret, headers: {} }
+    : { query: '', headers: { 'API-SECRET': secret } };
+};
+
+// Nightscout sgv entries for a dedupe query (see nsDedupe.js).
+const getNSEntries = (query) => {
+  const auth = nsAuth();
+  return requestPromise({
+    url: `${process.env.NIGHTSCOUT_HOST}/api/v1/entries.json?${query}${auth.query ? `&${auth.query}` : ''}`,
+    timeout: 15 * 1000,
+    method: 'GET',
+    headers: auth.headers,
+    json: true,
   });
 };
 
@@ -357,14 +377,21 @@ const convertBGCheck = (BGCheck) => [{
 
 module.exports = () => ({
   // API (public) functions
-  post: (glucose, sendToXdrip, sendToNS) => {
+  post: (glucose, sendToXdrip, sendToNS, { dedupe = false } = {}) => {
     const entry = [convertEntryToNS(glucose)];
 
     if (sendToXdrip) {
       postToXdrip(entry);
     }
 
-    if (sendToNS) {
+    if (sendToNS && dedupe) {
+      // fleet mode: another collector may already have uploaded this reading
+      nsDedupe.uploadUnlessPresent({
+        dateMs: entry[0].date, get: getNSEntries, post: postToNS, entry,
+      }).then((r) => {
+        if (r === 'duplicate') log('not uploading SGV: another collector already sent this reading');
+      });
+    } else if (sendToNS) {
       postToNS(entry);
     }
   },
