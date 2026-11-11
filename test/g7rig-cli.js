@@ -428,6 +428,10 @@ describe('g7-rig CLI', () => {
     JSON.parse(out).should.eql({ ok: true });
     const lines = b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt') && l !== 'bluetoothctl show');
     lines.should.eql(['/usr/local/sbin/g7-new-sensor 4321 DXCMcd', 'systemctl restart lookout']);
+    // a G7 advertises briefly around each 5-minute reading: listen long enough to catch one
+    const ns = b.calls.find((c) => c.line.startsWith('/usr/local/sbin/g7-new-sensor'));
+    Number(ns.opts.env.SCAN_SECONDS).should.be.aboveOrEqual(330);
+    ns.opts.timeoutMs.should.be.above(Number(ns.opts.env.SCAN_SECONDS) * 1000);
     const stored = await readStore(path.join(tmp, 'b', 'storage'), ['pairRequest', 'sensorName', 'keyRejected']);
     stored.should.eql({
       pairRequest: { code: '4321', name: 'DXCMcd', at: NOW },

@@ -32,6 +32,9 @@ const ENV_FILE = '/etc/lookout.env';
 const NEW_SENSOR = '/usr/local/sbin/g7-new-sensor';
 const FLEET_FLAG = '--no_auto_pair';
 const SCAN_SECONDS = 70;
+// pairing: a G7 advertises briefly around each 5-minute reading, so the
+// exact-name check before pairing listens long enough to catch one
+const PAIR_SCAN_SECONDS = 360;
 const STORAGE_KEYS = ['id', 'sensorName', 'sensorKey', 'glucoseHist', 'sensorSeen',
   'pairRequest', 'keyRejected', 'sensorStart', 'sessionLengthSeconds'];
 
@@ -377,8 +380,8 @@ const commands = {
     // g7-new-sensor: exact-name scan, pins --sensor_address, stores the code,
     // clears the old key and bond, restarts Lookout.
     const r = await io.exec(NEW_SENSOR, [code, name], {
-      env: { ...process.env, SCAN_SECONDS: String(SCAN_SECONDS) },
-      timeoutMs: (SCAN_SECONDS + 60) * 1000,
+      env: { ...process.env, SCAN_SECONDS: String(PAIR_SCAN_SECONDS) },
+      timeoutMs: (PAIR_SCAN_SECONDS + 60) * 1000,
     });
     if (r.stdout || r.stderr) io.stderr(`${r.stdout}${r.stderr}`);
     if (r.code !== 0) throw fail(`g7-new-sensor failed: ${lastLine(r.stderr) || `exit ${r.code}`}`);
