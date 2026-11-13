@@ -63,4 +63,18 @@ const slotFailureHint = ({ txId, displayType, failedReads }) => {
     + 'runs on a phone near this sensor).';
 };
 
-module.exports = { resolveDisplayType, slotFailureHint, NAMES };
+// The display type xdrip-js puts in the auth request for this transmitter:
+// G7 - the resolved slot (see above); G5/G6 - --alternate selects the
+// receiver slot (1), otherwise the phone slot (2), as the former
+// alternate-Bluetooth-channel flag did.
+const workerDisplayType = (args) => {
+  const g7 = resolveDisplayType(args);
+  if (g7 !== null) return g7;
+  return args.alternate ? NAMES.medical : NAMES.phone;
+};
+
+const nameOf = (n) => Object.keys(NAMES).find((k) => NAMES[k] === n) || String(n);
+
+module.exports = {
+  resolveDisplayType, workerDisplayType, slotFailureHint, nameOf, NAMES,
+};

@@ -23,3 +23,37 @@ describe('transmitter worker Node flags', () => {
 });
 
 should(true).be.ok();
+
+const { buildWorkerArgs, parseWorkerArgs } = require('../workerArgs');
+
+// xdrip-js takes the display type (the auth request's slot byte) as its third
+// constructor argument; it replaced the alternate-Bluetooth-channel flag.
+describe('transmitter worker arguments', () => {
+  const plan = {
+    id: '1234',
+    displayType: 3,
+    key: 'k'.repeat(32),
+    macAddress: 'AA:BB:CC:DD:EE:01',
+    sensorAddress: 'AA:BB:CC:DD:EE:01',
+    allowPairing: false,
+  };
+
+  it('round-trips through the command line', () => {
+    parseWorkerArgs(['node', 'worker', ...buildWorkerArgs(plan)]).should.eql(plan);
+  });
+
+  it('treats empty values as absent and allows pairing by default', () => {
+    parseWorkerArgs(['node', 'worker', '812345', '1', '', '', '', '']).should.eql({
+      id: '812345',
+      displayType: 1,
+      key: null,
+      macAddress: null,
+      sensorAddress: null,
+      allowPairing: true,
+    });
+  });
+
+  it('never passes an unknown display type through', () => {
+    (() => parseWorkerArgs(['node', 'worker', '1234', '7', '', '', '', '1'])).should.throw(/display type/);
+  });
+});

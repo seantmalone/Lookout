@@ -65,3 +65,22 @@ describe('displaySlot with no transmitter id yet', () => {
     should(slotFailureHint({ txId: undefined, displayType: 3, failedReads: 5 })).equal(null);
   });
 });
+
+describe('displaySlot.workerDisplayType (the byte xdrip-js sends)', () => {
+  const { workerDisplayType } = require('../displaySlot'); // eslint-disable-line global-require
+
+  it('G7: the resolved slot (watch by default)', () => {
+    workerDisplayType({ txId: '1234' }).should.equal(3);
+    workerDisplayType({ txId: '1234', displayType: 'phone' }).should.equal(2);
+  });
+
+  it('G7: still refuses the medical slot unless forced', () => {
+    (() => workerDisplayType({ txId: '1234', alternate: true })).should.throw(/medical slot/);
+    workerDisplayType({ txId: '1234', alternate: true, forceMedical: true }).should.equal(1);
+  });
+
+  it('G5/G6: --alternate is the receiver slot (1), otherwise phone (2), as before', () => {
+    workerDisplayType({ txId: '812345' }).should.equal(2);
+    workerDisplayType({ txId: '812345', alternate: true }).should.equal(1);
+  });
+});

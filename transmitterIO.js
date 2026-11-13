@@ -14,7 +14,7 @@ const rigHealth = require('./rigHealth');
 const displaySlot = require('./displaySlot');
 const fleetMode = require('./fleetMode');
 const { backfillRequest } = require('./backfillRequest');
-const { WORKER_EXEC_ARGV } = require('./workerArgs');
+const { WORKER_EXEC_ARGV, buildWorkerArgs } = require('./workerArgs');
 const xDripAPS = require('./xDripAPS')();
 
 // reading interval and derived timeouts (5 min / 6.5 min unless
@@ -1192,7 +1192,6 @@ module.exports = async (options, storage, client, fakeMeter) => {
     } else {
       // own Node flags: the launcher's tiny heap makes the G7 crypto ~2x slower
       const workerOptions = { execArgv: WORKER_EXEC_ARGV };
-      const btChannel = options.alternate_bt_channel ? '1' : '0';
       const plan = fleetMode.workerPlan({
         noAutoPair: options.no_auto_pair,
         sensorKey,
@@ -1209,9 +1208,11 @@ module.exports = async (options, storage, client, fakeMeter) => {
       const key = sensorKey?.key || '';
       const macAddress = sensorKey?.address || '';
 
+      // the display type xdrip-js sends (slot byte): G7 watch by default
+      // (medical refused unless forced); G5/G6 --alternate = receiver
       let displayType;
       try {
-        displayType = displaySlot.resolveDisplayType({
+        displayType = displaySlot.workerDisplayType({
           txId: id,
           displayType: options.display_type,
           alternate: options.alternate_bt_channel,
@@ -1221,15 +1222,19 @@ module.exports = async (options, storage, client, fakeMeter) => {
         error(`Not starting transmitter worker: ${err.message}`);
         return;
       }
-      if (displayType) {
-        log(`Using G7 display slot ${displayType}`);
-      }
+      log(`Using display type ${displayType} (${displaySlot.nameOf(displayType)})`);
       currentDisplayType = displayType;
 
       worker = cp.fork(
         `${__dirname}/transmitterWorker`,
-        [id, btChannel, key, macAddress, displayType ? String(displayType) : '',
-          options.sensor_address || '', plan.allowPairing ? '1' : '0'],
+        buildWorkerArgs({
+          id,
+          displayType,
+          key,
+          macAddress,
+          sensorAddress: options.sensor_address,
+          allowPairing: plan.allowPairing,
+        }),
         workerOptions,
       );
     }
