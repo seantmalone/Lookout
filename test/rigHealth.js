@@ -13,6 +13,13 @@ describe('rigHealth.shouldRebootRig', () => {
       .should.equal(true);
   });
 
+  it('never reboots when rebooting is disabled (--no_reboot)', () => {
+    // a collector in a multi-room fleet loses the sensor whenever the wearer leaves
+    rigHealth.shouldRebootRig({
+      txFailedReads: 5, lastSuccessfulRead: NOW - 60 * MIN, now: NOW, disabled: true,
+    }).should.equal(false);
+  });
+
   it('does not reboot while readings are recent', () => {
     rigHealth.shouldRebootRig({ txFailedReads: 3, lastSuccessfulRead: NOW - 6 * MIN, now: NOW })
       .should.equal(false);

@@ -1412,7 +1412,11 @@ module.exports = async (options, storage, client, fakeMeter) => {
       }
 
       if (rigHealth.shouldRebootRig({
-        txFailedReads, lastSuccessfulRead, now, rebootAfterMs: timing.rebootAfterMs,
+        txFailedReads,
+        lastSuccessfulRead,
+        now,
+        rebootAfterMs: timing.rebootAfterMs,
+        disabled: options.no_reboot,
       })) {
         // Automatically reboot on the 2nd failed read
         rebootRig();

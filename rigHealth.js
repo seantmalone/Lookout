@@ -4,9 +4,11 @@
 // never paired (new sensor, wrong pairing code, sensor not yet in range).
 // So only reboot once readings have succeeded and then stopped.
 const shouldRebootRig = ({
-  txFailedReads, lastSuccessfulRead, now, rebootAfterMs = 11 * 60000,
+  txFailedReads, lastSuccessfulRead, now, rebootAfterMs = 11 * 60000, disabled = false,
 }) => {
-  if (!lastSuccessfulRead) {
+  // --no_reboot: e.g. one of several collectors, where "no readings" usually
+  // means the wearer is in another room, not a wedged Bluetooth stack
+  if (disabled || !lastSuccessfulRead) {
     return false;
   }
   return txFailedReads >= 2 && (now - lastSuccessfulRead) > rebootAfterMs;

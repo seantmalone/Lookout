@@ -30,7 +30,10 @@ const { parseScan } = require('../lib/g7rig/scan');
 
 const ENV_FILE = '/etc/lookout.env';
 const NEW_SENSOR = '/usr/local/sbin/g7-new-sensor';
-const FLEET_FLAG = '--no_auto_pair';
+// fleet collectors: never pair on their own, and never reboot on missed reads
+// (the wearer is usually just nearer another collector)
+const FLEET_FLAGS = ['--no_auto_pair', '--no_reboot'];
+const withFleetFlags = (text) => FLEET_FLAGS.reduce((t, flag) => env.ensureFlag(t, flag), text);
 const SCAN_SECONDS = 70;
 // pairing: a G7 advertises briefly around each 5-minute reading, so the
 // exact-name check before pairing listens long enough to catch one
@@ -375,7 +378,7 @@ const commands = {
     const envText = readEnv(io, true);
     refuseMedical(envText);
     // fleet mode: after this pairing, never re-pair on its own (the key is shared)
-    const fleetEnv = env.ensureFlag(envText, FLEET_FLAG);
+    const fleetEnv = withFleetFlags(envText);
     if (fleetEnv !== envText) writeEnv(io, fleetEnv);
     // g7-new-sensor: exact-name scan, pins --sensor_address, stores the code,
     // clears the old key and bond, restarts Lookout.
@@ -412,7 +415,7 @@ const commands = {
     const record = keyfile.validateImport(parsed);
     const envText = readEnv(io, true);
     refuseMedical(envText);
-    const nextEnv = env.ensureFlag(env.setSensorAddress(envText, record.address), FLEET_FLAG);
+    const nextEnv = withFleetFlags(env.setSensorAddress(envText, record.address));
 
     const dir = await lookoutDir(io);
     const storage = await openStorage(io, dir);

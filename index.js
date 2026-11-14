@@ -103,6 +103,11 @@ const argv = yargs
     alias: 'd',
     default: '/root/myopenaps',
   })
+  .option('no_reboot', {
+    boolean: true,
+    describe: 'Never reboot the rig after repeated failed reads',
+    default: false,
+  })
   .option('no_auto_pair', {
     boolean: true,
     describe: 'Fleet mode: use the shared key; pair only when g7-rig pair asks',
@@ -173,6 +178,7 @@ const options = {
   nightscout: !params.no_nightscout,
   xdripaps: !params.no_xdripaps,
   no_auto_pair: params.no_auto_pair,
+  no_reboot: params.no_reboot,
   min_lsr_pairs: params.min_lsr_pairs,
   max_lsr_pairs: params.max_lsr_pairs,
   max_lsr_pairs_age: params.max_lsr_pairs_age,
