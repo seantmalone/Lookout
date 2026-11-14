@@ -15,12 +15,14 @@ const workerPlan = ({ noAutoPair, sensorKey, pairRequest }) => {
 // Storage changes for a 'sensorKey' message from the worker.
 // pairRequest present: this key comes from a pairing g7-rig asked for, so record
 // when it was paired (the UI adopts a key paired after its own record).
+// name: what the authenticated sensor advertised (DXCMxx), if it was seen.
 const onSensorKey = ({
-  data, noAutoPair, pairRequest = null, now = Date.now(),
+  data, noAutoPair, pairRequest = null, now = Date.now(), name = null,
 }) => {
   if (hasKey(data)) {
     const set = { sensorKey: data };
     if (pairRequest) set.pairedAt = now;
+    if (name) set.sensorName = name;
     return { set, remove: ['pairRequest', 'keyRejected'] };
   }
   // An empty key means authentication failed. In a fleet keep the shared key:

@@ -1155,6 +1155,9 @@ module.exports = async (options, storage, client, fakeMeter) => {
   };
 
   let lastSeen = null;
+  // advertised name per address, from sawTransmitter: the name of the sensor
+  // that authenticates is stored with its key (g7-rig pair needs only the code)
+  const seenNames = new Map();
 
   const applyStorageChanges = async ({ set, remove }) => {
     await storage.lock();
@@ -1363,6 +1366,10 @@ module.exports = async (options, storage, client, fakeMeter) => {
         // times we saw the transmitter
         txFailedReads += 1;
 
+        if (m.data?.address && m.data?.name) {
+          seenNames.set(m.data.address.toUpperCase(), m.data.name);
+        }
+
         // "last heard" for g7-rig status (rate-limited SD-card write)
         const seen = {
           time: Date.now(), rssi: m.data?.rssi ?? null, address: m.data?.address || null,
@@ -1384,6 +1391,7 @@ module.exports = async (options, storage, client, fakeMeter) => {
           noAutoPair: options.no_auto_pair,
           pairRequest: await storage.getItem('pairRequest'),
           now: Date.now(),
+          name: (m.data?.address && seenNames.get(m.data.address.toUpperCase())) || null,
         });
         if ('sensorKey' in changes.set) {
           sensorKey = m.data;

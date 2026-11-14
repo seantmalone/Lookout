@@ -74,6 +74,16 @@ describe('fleetMode.onSensorKey: when the key was paired', () => {
   });
 });
 
+describe('fleetMode.onSensorKey: the sensor name', () => {
+  it('stores the name the sensor advertised once it authenticated', () => {
+    fleet.onSensorKey({ data: KEY, noAutoPair: true, name: 'DXCMab' }).set.sensorName.should.equal('DXCMab');
+  });
+
+  it('leaves the stored name alone when none was seen', () => {
+    fleet.onSensorKey({ data: KEY, noAutoPair: true }).set.should.not.have.property('sensorName');
+  });
+});
+
 describe('fleetMode.onPairingBlocked', () => {
   it('records the rejection time', () => {
     fleet.onPairingBlocked({ now: 1000 })
