@@ -378,7 +378,7 @@ describe('g7-rig CLI', () => {
 
     const envPath = path.join(tmp, 'b', 'lookout.env');
     // fleet mode is switched on by import-key
-    fs.readFileSync(envPath, 'utf8').should.equal(envFile('AA:BB:CC:DD:EE:FF').replace('--no_xdripaps', '--no_xdripaps --no_auto_pair --no_reboot'));
+    fs.readFileSync(envPath, 'utf8').should.equal(envFile('AA:BB:CC:DD:EE:FF').replace(' --sensor_address AA:BB:CC:DD:EE:FF', '').replace('--no_xdripaps', '--no_xdripaps --no_auto_pair --no_reboot'));
     (fs.statSync(envPath).mode & 0o777).should.equal(0o600); // eslint-disable-line no-bitwise
     fs.readdirSync(path.join(tmp, 'b')).sort().should.eql(['g7-central', 'lookout.env', 'storage']);
 
@@ -418,43 +418,41 @@ describe('g7-rig CLI', () => {
     (await run(['import-key'], io)).should.equal(3);
     err.should.match(/medical/);
     io = makeIo('b', b.exec);
-    (await run(['pair', '1234', 'DXCMab'], io)).should.equal(3);
+    (await run(['pair', '1234'], io)).should.equal(3);
     b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt') && l !== 'bluetoothctl show').should.eql([]);
   });
 
-  it('pair runs g7-new-sensor, records the request and restarts Lookout', async () => {
+  it('pair sets the code, clears the old sensor and lets Lookout find the new one', async () => {
     const b = fakeExec();
     io = makeIo('b', b.exec);
-    (await run(['pair', '4321', 'DXCMcd'], io)).should.equal(0, err);
+    (await run(['pair', '4321'], io)).should.equal(0, err);
     JSON.parse(out).should.eql({ ok: true });
     const lines = b.calls.map((c) => c.line).filter((l) => !l.startsWith('systemctl show') && !l.startsWith('findmnt') && l !== 'bluetoothctl show');
-    lines.should.eql(['/usr/local/sbin/g7-new-sensor 4321 DXCMcd', 'systemctl restart lookout']);
-    // a G7 advertises briefly around each 5-minute reading: listen long enough to catch one
-    const ns = b.calls.find((c) => c.line.startsWith('/usr/local/sbin/g7-new-sensor'));
-    Number(ns.opts.env.SCAN_SECONDS).should.be.aboveOrEqual(330);
-    ns.opts.timeoutMs.should.be.above(Number(ns.opts.env.SCAN_SECONDS) * 1000);
-    const stored = await readStore(path.join(tmp, 'b', 'storage'), ['pairRequest', 'sensorName', 'keyRejected']);
-    stored.should.eql({
-      pairRequest: { code: '4321', name: 'DXCMcd', at: NOW },
-      sensorName: 'DXCMcd',
-      keyRejected: undefined,
-    });
+    // no scan and no separate tool: what `lookout id` does, plus the pair request
+    lines.should.eql(['systemctl stop lookout', 'bluetoothctl remove 11:22:33:44:55:66', 'systemctl start lookout']);
+    const stored = await readStore(path.join(tmp, 'b', 'storage'), ['id', 'sensorKey', 'sensorName', 'pairRequest', 'keyRejected', 'pairedAt',
+      'g5Calibration', 'expiredCal', 'bgChecks']);
+    stored.id.should.equal('4321');
+    should(stored.sensorKey).not.be.ok(); // the old key is gone
+    should(stored.sensorName).not.be.ok(); // learned from the new sensor
+    stored.pairRequest.should.eql({ code: '4321', at: NOW });
+    should(stored.keyRejected).not.be.ok();
+    should(stored.pairedAt).not.be.ok();
+    stored.g5Calibration.type.should.equal('Unity'); // calibration reset, as `lookout id` does
+    should(stored.expiredCal).not.be.ok();
+    should(stored.bgChecks).not.be.ok();
     const fleetEnv = fs.readFileSync(path.join(tmp, 'b', 'lookout.env'), 'utf8');
     fleetEnv.should.containEql('--no_auto_pair');
     fleetEnv.should.containEql('--no_reboot'); // fleet collectors never reboot on missed reads
+    fleetEnv.should.not.containEql('--sensor_address'); // no pin: Lookout latches after authenticating
+    fleetEnv.should.containEql('--display_type watch');
   });
 
-  it('pair reports a g7-new-sensor failure and records nothing', async () => {
-    const b = fakeExec({
-      '/usr/local/sbin/g7-new-sensor 4321 DXCMcd': { code: 1, stdout: 'scanning\n', stderr: 'g7-new-sensor: DXCMcd not seen\n' },
-    });
+  it('pair still starts Lookout when something fails half way', async () => {
+    const b = fakeExec({ 'bluetoothctl remove 11:22:33:44:55:66': { code: 1, stdout: '', stderr: 'not available' } });
     io = makeIo('b', b.exec);
-    (await run(['pair', '4321', 'DXCMcd'], io)).should.equal(1);
-    err.should.match(/DXCMcd not seen/);
-    out.should.equal('');
-    b.calls.map((c) => c.line).should.not.containEql('systemctl restart lookout');
-    const stored = await readStore(path.join(tmp, 'b', 'storage'), ['sensorName']);
-    stored.sensorName.should.equal('DXCMzz');
+    (await run(['pair', '4321'], io)).should.equal(0, err);
+    b.calls.map((c) => c.line).should.containEql('systemctl start lookout');
   });
 
   it('scan prints what bluetoothctl heard for exactly that name', async () => {

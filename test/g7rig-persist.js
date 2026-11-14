@@ -6,7 +6,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { PERSIST_KEYS, planSync, applySync } = require('../lib/g7rig/persist');
+const {
+  PERSIST_KEYS, planSync, applySync, bondAddress,
+} = require('../lib/g7rig/persist');
 
 // Read-only collectors: the SD card (the "lower" layer) is never written in
 // normal running; everything goes to RAM (the overlay). `g7-rig persist`
@@ -123,5 +125,23 @@ describe('g7-rig persist (read-only card)', () => {
     });
     walk(lower);
     all.filter((n) => n.includes('.tmp')).should.eql([]);
+  });
+});
+
+// Fleet collectors have no --sensor_address pin: the stored key's address is
+// the sensor whose bond must survive a power cut.
+describe('g7-rig persist.bondAddress', () => {
+  it('is the address of the stored key', () => {
+    bondAddress({ sensorKey: { key: 'k', address: 'aa:bb:cc:dd:ee:01' }, pinned: 'AA:BB:CC:DD:EE:99' })
+      .should.equal('AA:BB:CC:DD:EE:01');
+  });
+
+  it('falls back to the env pin without a stored address', () => {
+    bondAddress({ sensorKey: null, pinned: 'AA:BB:CC:DD:EE:99' }).should.equal('AA:BB:CC:DD:EE:99');
+    bondAddress({ sensorKey: { key: '', address: '' }, pinned: 'AA:BB:CC:DD:EE:99' }).should.equal('AA:BB:CC:DD:EE:99');
+  });
+
+  it('is null with neither', () => {
+    should(bondAddress({ sensorKey: null, pinned: null })).be.null();
   });
 });

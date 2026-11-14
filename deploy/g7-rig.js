@@ -5,8 +5,8 @@
 //
 //   g7-rig.js status              JSON status (never the key)
 //   g7-rig.js scan DXCMxx         {heard, rssi, address} for exactly that name
-//   g7-rig.js pair NNNN DXCMxx    g7-new-sensor, then ask Lookout to pair
-//   g7-rig.js export-key          {code, name, address, key}
+//   g7-rig.js pair NNNN           forget the old sensor, pair with the next that accepts the code
+//   g7-rig.js export-key          {code, name, address, key, central?, paired_at?}
 //   g7-rig.js import-key          read that record on stdin and install it
 //
 // Exit codes: 0 ok, 1 error, 2 rejected command, 3 refused (medical slot).
@@ -23,21 +23,20 @@ const { parseRemote } = require('../lib/g7rig/validate');
 const env = require('../lib/g7rig/env');
 const status = require('../lib/g7rig/status');
 const { makeDurable, fsyncDir, writeAtomic } = require('../lib/g7rig/durable');
-const { planSync, applySync } = require('../lib/g7rig/persist');
+const { planSync, applySync, bondAddress } = require('../lib/g7rig/persist');
 const central = require('../lib/g7rig/central');
 const keyfile = require('../lib/g7rig/keyfile');
 const { parseScan } = require('../lib/g7rig/scan');
 
 const ENV_FILE = '/etc/lookout.env';
-const NEW_SENSOR = '/usr/local/sbin/g7-new-sensor';
 // fleet collectors: never pair on their own, and never reboot on missed reads
 // (the wearer is usually just nearer another collector)
 const FLEET_FLAGS = ['--no_auto_pair', '--no_reboot'];
 const withFleetFlags = (text) => FLEET_FLAGS.reduce((t, flag) => env.ensureFlag(t, flag), text);
 const SCAN_SECONDS = 70;
-// pairing: a G7 advertises briefly around each 5-minute reading, so the
-// exact-name check before pairing listens long enough to catch one
-const PAIR_SCAN_SECONDS = 360;
+// what a collector's env needs: fleet flags, an explicit slot, and no
+// --sensor_address pin (Lookout latches onto the address that authenticates)
+const collectorEnv = (text) => env.ensureDisplayType(withFleetFlags(env.removeSensorAddress(text)));
 const STORAGE_KEYS = ['id', 'sensorName', 'sensorKey', 'glucoseHist', 'sensorSeen',
   'pairRequest', 'keyRejected', 'sensorStart', 'sessionLengthSeconds'];
 
@@ -101,7 +100,7 @@ const lookoutVersion = (dir) => {
   }
 };
 
-// node-persist from Lookout's own node_modules, as g7-new-sensor does.
+// node-persist from Lookout's own node_modules (same version and format).
 const openStorage = async (io, dir) => {
   const storageDir = io.env.G7RIG_STORAGE || (dir && path.join(dir, 'storage'));
   if (!storageDir || !fs.existsSync(storageDir)) throw fail('Lookout storage not found');
@@ -132,6 +131,13 @@ const fixOwnership = (io, storageDir) => {
   const { uid, gid } = fs.statSync(storageDir);
   fs.readdirSync(storageDir).forEach((f) => fs.chownSync(path.join(storageDir, f), uid, gid));
 };
+
+// What Lookout's calibration.clearCalibration does (as `lookout id`): drop the
+// old calibration and start again from unity.
+const CAL_KEYS = ['g5Calibration', 'expiredCal', 'bgChecks'];
+const unityCalibration = (now) => ({
+  date: now, scale: 1, intercept: 0, slope: 1000, type: 'Unity',
+});
 
 const writeItems = async (io, { store, storageDir }, sets, dels = []) => {
   // node-persist v2 calls are not safe to run in parallel on one instance's files
@@ -174,7 +180,7 @@ const writeEnv = (io, text) => {
 
 const refuseMedical = (envText) => {
   if (env.readArgs(envText).medical) {
-    throw fail('LOOKOUT_ARGS uses the medical slot (--force_medical_slot / --alternate); refusing', 3);
+    throw fail('LOOKOUT_ARGS uses the medical slot (--display_type medical / --force_medical_slot / --alternate); refusing', 3);
   }
 };
 
@@ -278,7 +284,15 @@ const persistNow = async (io) => {
     const dir = await lookoutDir(io);
     const storageDir = io.env.G7RIG_STORAGE || (dir && path.join(dir, 'storage'));
     if (!storageDir) throw fail('Lookout storage not found');
-    const { sensorAddress } = env.readArgs(readEnv(io));
+    // the bond to keep: the stored key's sensor, else an env pin
+    let sensorKey = null;
+    try {
+      sensorKey = await (await openStorage(io, dir)).store.getItem('sensorKey');
+    } catch (e) {
+      sensorKey = null;
+    }
+    const pinned = env.readArgs(readEnv(io)).sensorAddress;
+    const sensorAddress = bondAddress({ sensorKey, pinned });
     const lower = lowerRoot(io);
     const ops = planSync({
       upperRoot: '/',
@@ -374,25 +388,38 @@ const commands = {
     printJson(io, parseScan(`${scan.stdout}\n${scan.stderr}`, devices.stdout, name));
   },
 
-  pair: async (io, [code, name]) => {
+  // Like `lookout id <code>`, plus a pair request for fleet mode: Lookout then
+  // connects to any DXCM sensor, keeps the one that accepts the code, and from
+  // then on only that address. No scan here: this returns within seconds.
+  pair: async (io, [code]) => {
     const envText = readEnv(io, true);
     refuseMedical(envText);
-    // fleet mode: after this pairing, never re-pair on its own (the key is shared)
-    const fleetEnv = withFleetFlags(envText);
-    if (fleetEnv !== envText) writeEnv(io, fleetEnv);
-    // g7-new-sensor: exact-name scan, pins --sensor_address, stores the code,
-    // clears the old key and bond, restarts Lookout.
-    const r = await io.exec(NEW_SENSOR, [code, name], {
-      env: { ...process.env, SCAN_SECONDS: String(PAIR_SCAN_SECONDS) },
-      timeoutMs: (PAIR_SCAN_SECONDS + 60) * 1000,
-    });
-    if (r.stdout || r.stderr) io.stderr(`${r.stdout}${r.stderr}`);
-    if (r.code !== 0) throw fail(`g7-new-sensor failed: ${lastLine(r.stderr) || `exit ${r.code}`}`);
+    const nextEnv = collectorEnv(envText);
+
     const dir = await lookoutDir(io);
     const storage = await openStorage(io, dir);
-    await writeItems(io, storage, { pairRequest: { code, name, at: io.now() }, sensorName: name }, ['keyRejected']);
-    await persistQuietly(io);
-    await mustRun(io, 'systemctl', ['restart', 'lookout'], 'restarting lookout');
+    const old = await readItems(storage.store);
+    const addresses = [env.readArgs(envText).sensorAddress, old.sensorKey && old.sensorKey.address]
+      .filter(Boolean).map((a) => a.toUpperCase())
+      .filter((a, i, all) => all.indexOf(a) === i);
+
+    await mustRun(io, 'systemctl', ['stop', 'lookout'], 'stopping lookout');
+    try {
+      const now = io.now();
+      await writeItems(io, storage, {}, ['sensorKey', 'sensorName', 'keyRejected', 'pairedAt', ...CAL_KEYS]);
+      await writeItems(io, storage, {
+        id: code,
+        g5Calibration: unityCalibration(now),
+        pairRequest: { code, at: now },
+      });
+      if (nextEnv !== envText) writeEnv(io, nextEnv);
+      // the old sensor's bond (failures are fine: it may not be bonded)
+      // eslint-disable-next-line no-restricted-syntax
+      for (const mac of addresses) await io.exec('bluetoothctl', ['remove', mac]); // eslint-disable-line no-await-in-loop
+      await persistQuietly(io);
+    } finally {
+      await mustRun(io, 'systemctl', ['start', 'lookout'], 'starting lookout');
+    }
     printJson(io, { ok: true });
   },
 
@@ -415,7 +442,8 @@ const commands = {
     const record = keyfile.validateImport(parsed);
     const envText = readEnv(io, true);
     refuseMedical(envText);
-    const nextEnv = withFleetFlags(env.setSensorAddress(envText, record.address));
+    // no pin: the address in sensorKey is what Lookout connects to
+    const nextEnv = collectorEnv(envText);
 
     const dir = await lookoutDir(io);
     const storage = await openStorage(io, dir);
@@ -429,9 +457,9 @@ const commands = {
       await writeItems(io, storage, {
         id: record.code,
         sensorKey: { key: record.key, address: record.address },
-        sensorName: record.name,
+        ...(record.name ? { sensorName: record.name } : {}),
         ...(record.paired_at ? { pairedAt: Date.parse(record.paired_at) } : {}),
-      }, ['pairRequest', 'keyRejected']);
+      }, ['pairRequest', 'keyRejected', ...(record.name ? [] : ['sensorName'])]);
       writeEnv(io, nextEnv);
       // eslint-disable-next-line no-restricted-syntax
       for (const mac of addresses) await io.exec('bluetoothctl', ['remove', mac]); // eslint-disable-line no-await-in-loop
