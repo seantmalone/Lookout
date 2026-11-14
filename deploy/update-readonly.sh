@@ -41,7 +41,7 @@ if [ -L "$SRC/node_modules/xdrip-js" ]; then
   [ -f "$XDRIP/package.json" ] && [ -d "$XDRIP/lib" ] || XDRIP=""
 fi
 [ -n "$XDRIP" ] && rsync -rlt --exclude=node_modules --exclude=.git "$XDRIP/" "$STAGE/xdrip/"
-PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote /usr/local/sbin/g7-new-sensor
+PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
   /usr/local/sbin/g7-central-apply /usr/local/lib/g7rig
   /etc/systemd/system/lookout.service /etc/systemd/system/lookout.service.d
   /etc/systemd/system/bluetooth.service.d /etc/systemd/system/g7-central.service
