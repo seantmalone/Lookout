@@ -50,19 +50,6 @@ const resolveDisplayType = ({
   return slot;
 };
 
-// Hint for repeated failed reads on the G7 watch slot. xdrip-js presents the
-// community's xDrip+ display certificate; a real sensor might tie it to the
-// phone display type and refuse it on the watch slot (untested on hardware).
-const slotFailureHint = ({ txId, displayType, failedReads }) => {
-  if (!isG7(txId) || displayType !== NAMES.watch || failedReads < 3) {
-    return null;
-  }
-  return `${failedReads} failed reads on the G7 watch slot (3). One possible cause: the sensor `
-    + 'may not accept the xDrip+ display certificate on the watch slot. If this persists with a '
-    + 'real sensor, try --display_type phone (slot 2; this conflicts with the Dexcom app if it '
-    + 'runs on a phone near this sensor).';
-};
-
 // The display type xdrip-js puts in the auth request for this transmitter:
 // G7 - the resolved slot (see above); G5/G6 - --alternate selects the
 // receiver slot (1), otherwise the phone slot (2), as the former
@@ -76,5 +63,5 @@ const workerDisplayType = (args) => {
 const nameOf = (n) => Object.keys(NAMES).find((k) => NAMES[k] === n) || String(n);
 
 module.exports = {
-  resolveDisplayType, workerDisplayType, slotFailureHint, nameOf, NAMES,
+  resolveDisplayType, workerDisplayType, nameOf, NAMES,
 };

@@ -33,8 +33,6 @@ module.exports = async (options, storage, client, fakeMeter) => {
   let txFirmware = null;
   // G7 session length (incl. grace) reported by the sensor; distinguishes 10/15-day
   let txSessionLengthSeconds = null;
-  // G7 display slot the current worker uses (for failure hints)
-  let currentDisplayType = null;
   // when BatteryStatus was last queued (it may never be answered)
   let lastBatteryRequest = null;
   let pending = [];
@@ -1226,7 +1224,6 @@ module.exports = async (options, storage, client, fakeMeter) => {
         return;
       }
       log(`Using display type ${displayType} (${displaySlot.nameOf(displayType)})`);
-      currentDisplayType = displayType;
 
       worker = cp.fork(
         `${__dirname}/transmitterWorker`,
@@ -1411,13 +1408,6 @@ module.exports = async (options, storage, client, fakeMeter) => {
       }
 
       const now = Date.now();
-
-      const slotHint = displaySlot.slotFailureHint({
-        txId, displayType: currentDisplayType, failedReads: txFailedReads,
-      });
-      if (slotHint) {
-        error(slotHint);
-      }
 
       if (rigHealth.shouldRebootRig({
         txFailedReads,
