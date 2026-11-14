@@ -46,7 +46,7 @@ SHELLS.forEach((shell) => describe(`g7-rig-remote.sh (forced-command wrapper) un
     (fs.statSync(SCRIPT).mode & 0o111).should.not.equal(0); // eslint-disable-line no-bitwise
   });
 
-  const allowed = ['status', 'export-key', 'import-key', 'scan DXCMab', 'scan DXCM12', 'pair 1234 DXCMab', 'pair 0000 DXCMZ9'];
+  const allowed = ['status', 'export-key', 'import-key', 'scan DXCMab', 'scan DXCM12', 'pair 1234', 'pair 0000'];
 
   allowed.forEach((cmd) => {
     it(`execs node g7-rig.js for ${JSON.stringify(cmd)}`, () => {
@@ -76,8 +76,8 @@ SHELLS.forEach((shell) => describe(`g7-rig-remote.sh (forced-command wrapper) un
     '', 'status ', ' status', 'status; id', 'status;id', 'status && id', 'status | id', 'status\nid',
     'export-key x', 'import-key -', 'scan', 'scan DXCM', 'scan DXCMa', 'scan DXCMa!', 'scan DXCMabc',
     'scan DXCMab && id', 'scan DXCMab; id', 'scan DXCM*?', 'scan DXCM[a]', 'scan DXCMé', 'scan  DXCMab',
-    'pair 12345 DXCMab', 'pair 123 DXCMab', 'pair 1234 DXCMab extra', 'pair 1234  DXCMab',
-    'pair 1234 DXCMab;id', 'pair 1a34 DXCMab', '$(id)', '`id`', 'status $(id)', 'cat /etc/shadow',
+    'pair 12345', 'pair 123', 'pair 1234 DXCMab', 'pair 1234 extra', 'pair 1234 ',
+    'pair 1234;id', 'pair 1a34', '$(id)', '`id`', 'status $(id)', 'cat /etc/shadow',
     'sh', 'STATUS', '--help',
   ];
 

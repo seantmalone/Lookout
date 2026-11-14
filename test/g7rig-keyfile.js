@@ -56,7 +56,7 @@ describe('g7-rig keyfile.validateImport', () => {
 
   const bad = {
     code: ['123', '12345', 'abcd', 1234, '', null, '1234\n'],
-    name: ['DXCM', 'DXCMabc', 'dxcmab', 'DXCMa!', '', null, 'DXCMab\n'],
+    name: ['DXCM', 'DXCMabc', 'dxcmab', 'DXCMa!', '', 'DXCMab\n'],
     address: ['01:23:45:67:89', 'GG:23:45:67:89:AB', '01-23-45-67-89-AB', '', null, 'AA:BB:CC:DD:EE:FF\n'],
     key: [KEY.slice(1), `${KEY}0`, `${KEY.slice(2)}zz`, '', null, `${KEY}\n`],
   };
@@ -127,5 +127,16 @@ describe('g7-rig keyfile: when the key was paired', () => {
 
   it('rejects a malformed paired_at', () => {
     should.throws(() => keyfile.validateImport({ ...record(), paired_at: 'yesterday' }), /bad paired_at/);
+  });
+});
+
+describe('g7-rig keyfile: the sensor name is optional', () => {
+  it('exports and imports a record without a name (not known until the sensor was heard)', () => {
+    const out = keyfile.exportRecord({
+      storage: { id: '1234', sensorKey: { key: KEY, address: 'AA:BB:CC:DD:EE:FF' } },
+      envText: ENV,
+    });
+    should(out.name).be.null();
+    should(keyfile.validateImport(JSON.parse(JSON.stringify(out))).name).be.null();
   });
 });

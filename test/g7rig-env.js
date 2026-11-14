@@ -2,7 +2,9 @@
 
 const should = require('should');
 
-const { readArgs, setSensorAddress, ensureFlag } = require('../lib/g7rig/env');
+const {
+  readArgs, setSensorAddress, ensureFlag, removeSensorAddress, ensureDisplayType,
+} = require('../lib/g7rig/env');
 
 const ENV = [
   '# comment mentioning --force_medical_slot and --sensor_address 11:11:11:11:11:11',
@@ -129,5 +131,41 @@ describe('g7-rig env.setSensorAddress', () => {
       '01:23:45:67:89:AB; id', '01:23:45:67:89:AB\nAPI_SECRET=x', null].forEach((addr) => {
       should.throws(() => setSensorAddress(ENV, addr), /address/);
     });
+  });
+});
+
+describe('g7-rig env.removeSensorAddress', () => {
+  it('drops the pin and leaves every other flag alone', () => {
+    removeSensorAddress(ENV).should.equal(ENV.replace(' --sensor_address AA:BB:CC:DD:EE:FF', ''));
+  });
+
+  it('is a no-op without a pin', () => {
+    const noPin = removeSensorAddress(ENV);
+    removeSensorAddress(noPin).should.equal(noPin);
+  });
+});
+
+describe('g7-rig env.ensureDisplayType', () => {
+  it('adds the watch slot when no display type is set (the Lookout default is the phone slot)', () => {
+    ensureDisplayType('LOOKOUT_ARGS=--no_xdripaps\n').should.equal('LOOKOUT_ARGS=--no_xdripaps --display_type watch\n');
+  });
+
+  it('leaves an explicit display type alone', () => {
+    ensureDisplayType(ENV).should.equal(ENV);
+    ensureDisplayType('LOOKOUT_ARGS=--display_type=phone\n').should.equal('LOOKOUT_ARGS=--display_type=phone\n');
+  });
+});
+
+describe('g7-rig env.readArgs: every way to ask for the medical slot', () => {
+  ['--display_type medical', '--display_type=medical', '--display_type receiver', '--display_type 1',
+    '--display_type=1', '--alternate', '-c'].forEach((flags) => {
+    it(`flags "${flags}"`, () => {
+      readArgs(`LOOKOUT_ARGS=${flags} --no_xdripaps\n`).medical.should.equal(true);
+    });
+  });
+
+  it('does not flag watch or phone', () => {
+    readArgs('LOOKOUT_ARGS=--display_type watch\n').medical.should.equal(false);
+    readArgs('LOOKOUT_ARGS=--display_type 2\n').medical.should.equal(false);
   });
 });

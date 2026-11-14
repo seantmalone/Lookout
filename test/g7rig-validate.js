@@ -16,8 +16,8 @@ describe('g7-rig validate.parseRemote', () => {
     parseRemote('scan DXCM1Z').should.eql({ cmd: 'scan', args: ['DXCM1Z'] });
   });
 
-  it('accepts pair with a 4-digit code and a sensor name', () => {
-    parseRemote('pair 1234 DXCMab').should.eql({ cmd: 'pair', args: ['1234', 'DXCMab'] });
+  it('accepts pair with just the 4-digit code (Lookout finds the sensor by authenticating)', () => {
+    parseRemote('pair 1234').should.eql({ cmd: 'pair', args: ['1234'] });
   });
 
   const rejected = [
@@ -45,7 +45,8 @@ describe('g7-rig validate.parseRemote', () => {
     'pair 12345 DXCMab',
     'pair 123 DXCMab',
     'pair 12a4 DXCMab',
-    'pair 1234',
+    'pair 1234 DXCMab',
+    'pair 1234 ',
     'pair 1234 DXCMab extra',
     'pair 1234 DXCMab;id',
     '$(id)',
