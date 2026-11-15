@@ -215,7 +215,15 @@ fake `exec`), the CMA edit on sample config files, `sh -n` of every script.
 Checked on the devices before the change: the numbers above, `swap.conf(5)`
 (Mechanism values, drop-ins in `/etc/rpi/swap.conf.d/`, zram removes any
 existing file) and that the vc4-kms-v3d overlay accepts `cma-64`.
-Verified on the devices: <to be filled in after deployment>
+Verified on the devices (2026-11-15, two Pi Zero W collectors, Raspberry Pi OS 13): after
+`update-readonly.sh`, `harden.sh` and a reboot, both show `CmaTotal: 65536 kB`, swap on
+`/dev/zram0` only, no `/var/swap` on the card, no start of `rpi-resize-swap-file.service`
+and no out-of-memory kill since boot, about 255 MB available, the card read-only, and the
+watchdog timer running (it heard advertisements on every sample, so it has not had to act).
+On the first device the card would not relock after the swap file was deleted until the
+caches were dropped by hand; the scripts now do that, and the second device relocked by
+itself. Not yet verified: readings after the change (the sensor was out of range of both
+devices at the time), and the watchdog actually restarting Bluetooth on a deaf adapter.
 
 ## Watching it
 
