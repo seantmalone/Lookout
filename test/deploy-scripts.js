@@ -25,6 +25,52 @@ describe('deploy scripts', () => {
     });
   }));
 
+  describe('swap on a read-only card (rpi-swap: zram only, no swap file)', () => {
+    const DROPIN = '/etc/rpi/swap.conf.d/90-g7-readonly.conf';
+    const readonly = () => read('readonly.sh');
+
+    it('readonly.sh writes the drop-in only when rpi-swap is installed', () => {
+      const s = readonly();
+      const fn = /^swap_zram_only\(\) \{\n([\s\S]*?)\n\}$/m.exec(s);
+      fn.should.be.ok();
+      fn[1].should.match(/\[ -f \/etc\/rpi\/swap\.conf \] \|\| \{/);
+      fn[1].should.containEql(DROPIN);
+      const body = /<<'SWAP'\n([\s\S]*?)\nSWAP\n/.exec(fn[1])[1].split('\n');
+      body.filter((l) => !l.startsWith('#')).should.eql(['[Main]', 'Mechanism=zram']);
+      body.filter((l) => l.startsWith('#')).length.should.be.above(2); // says why
+    });
+
+    it('readonly.sh runs it from enable and from units (re-runnable on a read-only Pi)', () => {
+      const s = readonly();
+      /^ {2}units\)\n[\s\S]*?swap_zram_only[\s\S]*?;;/m.test(s).should.equal(true);
+      /^ {2}enable\)\n[\s\S]*?swap_zram_only\n[\s\S]*?remove_swapfile_writable_card[\s\S]*?;;/m.test(s).should.equal(true);
+    });
+
+    it('update-readonly.sh carries the drop-in to the card', () => {
+      mirroredPaths().should.containEql(DROPIN);
+    });
+
+    it('removes the swap file with literal paths only, on the card, never through the overlay', () => {
+      const rmLines = (f) => read(f).split('\n').filter((l) => /\brm\b/.test(l) && /swap/.test(l)).map((l) => l.trim());
+      rmLines('readonly.sh').should.eql(['rm -f /var/swap']);
+      rmLines('update-readonly.sh').should.eql(['rm -f /media/root-ro/var/swap']);
+      // the writable-card removal refuses to run under the overlay
+      /^remove_swapfile_writable_card\(\) \{\n[\s\S]*?overlay_active && [\s\S]*?rm -f \/var\/swap[\s\S]*?\n\}$/m
+        .test(readonly()).should.equal(true);
+    });
+
+    it('update-readonly.sh removes it inside the unlocked window and verifies after relocking', () => {
+      const s = read('update-readonly.sh');
+      const unlock = s.indexOf('mount -o remount,rw "$L"');
+      const rm = s.indexOf('rm -f /media/root-ro/var/swap');
+      const relock = s.indexOf('\nrelock\n');
+      unlock.should.be.above(-1);
+      rm.should.be.above(unlock);
+      relock.should.be.above(rm);
+      s.indexOf('[ -e /media/root-ro/var/swap ]', relock).should.be.above(relock);
+    });
+  });
+
   describe('g7-bt-watchdog units', () => {
     it('install.sh installs the service and enables the timer', () => {
       const s = read('install.sh');

@@ -5,6 +5,9 @@
 # It installs everything on the running system (install.sh), then unlocks the
 # card, mirrors Lookout's code and the installed files onto it, and relocks it
 # (verified). Lookout's storage and the env file are left to g7-rig persist.
+# With rpi-swap set to zram only (readonly.sh units), it also deletes the old
+# swap file from the card itself (/media/root-ro/var/swap), never through the
+# overlay. The swap change takes effect at the next reboot.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -48,6 +51,7 @@ PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
   /etc/systemd/system/g7-persist.service /etc/systemd/system/g7-persist.path
   /etc/systemd/system/g7-persist.timer /etc/systemd/system/systemd-remount-fs.service.d
   /etc/systemd/system/g7-bt-watchdog.service /etc/systemd/system/g7-bt-watchdog.timer
+  /etc/rpi/swap.conf.d/90-g7-readonly.conf
   /etc/systemd/system/multi-user.target.wants/lookout.service
   /etc/systemd/system/multi-user.target.wants/g7-central.service
   /etc/systemd/system/multi-user.target.wants/g7-persist.path
@@ -56,6 +60,13 @@ PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
 for p in $PATHS; do
   if [ -e "$p" ] || [ -L "$p" ]; then cp -a --parents "$p" "$STAGE/root/"; fi
 done
+
+# The old swap file on the card: rpi-swap now uses zram only (the drop-in
+# above). Decided before unlocking; literal paths only.
+RM_SWAP=no
+if [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ] && [ -f /media/root-ro/var/swap ] && [ ! -L /media/root-ro/var/swap ]; then
+  RM_SWAP=yes
+fi
 
 mount -o remount,rw "$L"
 trap 'relock; rm -rf "$STAGE"' EXIT
@@ -68,6 +79,9 @@ for p in $PATHS; do
     cp -a "$STAGE/root$p" "$L$p"
   fi
 done
+if [ "$RM_SWAP" = yes ]; then
+  rm -f /media/root-ro/var/swap
+fi
 trap - EXIT
 relock
 # check: every staged file is on the card, byte for byte
@@ -81,6 +95,13 @@ for p in $PATHS; do
     echo "card differs: $p" >&2; bad=1
   fi
 done
+if [ "$RM_SWAP" = yes ]; then
+  if [ -e /media/root-ro/var/swap ]; then
+    echo "card still has its swap file: /media/root-ro/var/swap" >&2; bad=1
+  else
+    echo "removed the old swap file from the card (/var/swap); zram only from the next reboot"
+  fi
+fi
 rm -rf "$STAGE"
 [ $bad = 0 ] || exit 1
 echo "updated the running system and the card (verified)"

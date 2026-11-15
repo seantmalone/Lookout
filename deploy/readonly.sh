@@ -18,6 +18,13 @@
 #  - from g7-persist.path when Lookout stores a new key or the env changes
 #  - from g7-persist.timer at boot and hourly (backstop)
 # Software updates: `readonly.sh disable --reboot`, update, `enable --reboot`.
+#
+# Swap (enable and units): with rpi-swap installed, a drop-in sets
+# Mechanism=zram (compressed RAM only, no swap file). The default (auto =
+# zram+file) keeps trying to resize /var/swap, which on a read-only card
+# copies the file into the RAM overlay until that is full. enable removes the
+# old swap file from the still-writable card; on a card that is already
+# read-only, update-readonly.sh removes it from the card itself.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -78,6 +85,39 @@ ConditionKernelCommandLine=!overlayroot=tmpfs
 UNIT
 }
 
+# rpi-swap: compressed RAM (zram) only, no swap file
+swap_zram_only() {
+  [ -f /etc/rpi/swap.conf ] || { echo "swap: rpi-swap not installed; left unchanged"; return 0; }
+  install -d -m 755 /etc/rpi/swap.conf.d
+  cat > /etc/rpi/swap.conf.d/90-g7-readonly.conf.tmp <<'SWAP'
+# Read-only SD card (deploy/readonly.sh): swap in compressed RAM (zram) only.
+# With the default (Mechanism=auto, i.e. zram+file) rpi-resize-swap-file
+# tried to resize /var/swap about once a minute; on the read-only card each
+# try copied the file into the RAM overlay until it was full ("No space left
+# on device"), cost ~9 s of CPU and ~200 MB of RAM, and led to kernel
+# out-of-memory kills. With zram no swap file is used. Delete this file (on
+# the card too) to go back to the default.
+[Main]
+Mechanism=zram
+SWAP
+  chmod 644 /etc/rpi/swap.conf.d/90-g7-readonly.conf.tmp
+  mv -f /etc/rpi/swap.conf.d/90-g7-readonly.conf.tmp /etc/rpi/swap.conf.d/90-g7-readonly.conf
+  echo "swap: zram only (/etc/rpi/swap.conf.d/90-g7-readonly.conf), from the next boot"
+}
+
+# The old swap file, while the card is still writable (before the overlay).
+# Never through the overlay: opening it there copies all of it into RAM.
+remove_swapfile_writable_card() {
+  [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ] || return 0
+  overlay_active && { echo "swap: card is read-only; deploy/update-readonly.sh removes the card's swap file"; return 0; }
+  [ -f /var/swap ] && [ ! -L /var/swap ] || return 0
+  if grep -q '^/var/swap[[:space:]]' /proc/swaps; then
+    swapoff /var/swap || { echo "swap: /var/swap is in use and could not be turned off; left in place" >&2; return 0; }
+  fi
+  rm -f /var/swap
+  echo "swap: removed /var/swap from the card"
+}
+
 set_cmdline() {
   if [ "$1" = on ]; then
     overlay_configured || sed -i "1 s/^/overlayroot=tmpfs /" "$CMDLINE"
@@ -122,9 +162,11 @@ install_file() {
 
 case "$ACTION" in
   units)
-    # (re)install the persist units and the remount-fs drop-in on the running system
+    # (re)install the persist units, the remount-fs drop-in and the swap
+    # drop-in on the running system (update-readonly.sh copies them to the card)
     install_units
     skip_remount_fs_when_readonly
+    swap_zram_only
     exit 0
     ;;
   install)
@@ -137,12 +179,20 @@ case "$ACTION" in
     if overlay_configured; then echo "next boot: read-only"; else echo "next boot: writable"; fi
     echo "boot partition: $(findmnt -no OPTIONS /boot/firmware | cut -d, -f1)"
     echo "g7-persist: path $(systemctl is-enabled g7-persist.path 2>/dev/null || echo missing), timer $(systemctl is-enabled g7-persist.timer 2>/dev/null || echo missing)"
+    if [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ]; then echo "swap: zram only"
+    elif [ -f /etc/rpi/swap.conf ]; then echo "swap: rpi-swap default (no zram-only drop-in)"
+    else echo "swap: rpi-swap not installed"; fi
+    if overlay_active; then
+      if [ -e /media/root-ro/var/swap ]; then echo "card swap file: present"; else echo "card swap file: none"; fi
+    elif [ -e /var/swap ]; then echo "card swap file: present"; else echo "card swap file: none"; fi
     ;;
   enable)
     mem=$(awk '/MemTotal/{print $2; exit}' /proc/meminfo)
     [ "$mem" -gt 262144 ] || { echo "at least 512 MB RAM needed" >&2; exit 1; }
     install_units
     skip_remount_fs_when_readonly
+    swap_zram_only
+    remove_swapfile_writable_card
     if ! dpkg -s overlayroot >/dev/null 2>&1; then
       # the package regenerates the initramfs images on the boot partition
       with_boot_rw env DEBIAN_FRONTEND=noninteractive apt-get install -y -q overlayroot
