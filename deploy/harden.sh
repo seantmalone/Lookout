@@ -14,6 +14,13 @@
 #     and reboot (it comes back read-only).
 #  4. Checks that the root filesystem is repaired automatically at boot
 #     (fsck.repair=yes on the kernel command line).
+#  5. Less memory reserved for graphics: dtoverlay=vc4-kms-v3d becomes
+#     dtoverlay=vc4-kms-v3d,cma-64 in /boot/firmware/config.txt. The default
+#     reserves 256 MB of a Pi Zero's ~437 MB as CMA, which the kernel's own
+#     allocations cannot use; with spikes of RAM use (read-only card) the
+#     kernel ran out and killed processes. Collectors use no HDMI. Only that
+#     exact line is changed (an overlay with parameters is left alone); the
+#     old file is kept once as config.txt.pre-harden. Active after a reboot.
 #
 # Lookout and g7-rig already write their data crash-safely (temp file,
 # fsync, rename, fsync the directory), so after a power cut every item holds
@@ -21,6 +28,29 @@
 # ever lost.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+
+# run "$@" with the boot partition writable, then make it read-only again
+# if it was (as deploy/readonly.sh does)
+with_boot_rw() {
+  was_ro=no
+  if findmnt -no OPTIONS /boot/firmware | tr ',' '\n' | grep -qx ro; then
+    was_ro=yes
+    mount -o remount,rw /boot/firmware
+  fi
+  rc=0
+  "$@" || rc=$?
+  sync
+  if [ "$was_ro" = yes ]; then mount -o remount,ro /boot/firmware; fi
+  return $rc
+}
+
+# exactly "dtoverlay=vc4-kms-v3d" -> "dtoverlay=vc4-kms-v3d,cma-64"
+CMA_SED='s/^dtoverlay=vc4-kms-v3d$/dtoverlay=vc4-kms-v3d,cma-64/'
+cma64_config() {
+  # (called from an `if`, where set -e does not apply: check each step)
+  [ -e /boot/firmware/config.txt.pre-harden ] || cp /boot/firmware/config.txt /boot/firmware/config.txt.pre-harden || return 1
+  sed -i "$CMA_SED" /boot/firmware/config.txt || return 1
+}
 
 # 1. logs in RAM
 install -d -m 755 /etc/systemd/journald.conf.d
@@ -70,4 +100,21 @@ if grep -qw 'fsck.repair=yes' /proc/cmdline; then
   echo "root fs: repaired automatically at boot"
 else
   echo "warning: fsck.repair=yes is not on the kernel command line (/boot/firmware/cmdline.txt)" >&2
+fi
+
+# 5. 64 MB CMA instead of 256 MB (vc4-kms-v3d overlay)
+if [ ! -f /boot/firmware/config.txt ]; then
+  echo "config.txt: /boot/firmware/config.txt not found; CMA left unchanged" >&2
+elif grep -qx 'dtoverlay=vc4-kms-v3d' /boot/firmware/config.txt; then
+  if with_boot_rw cma64_config && grep -qx 'dtoverlay=vc4-kms-v3d,cma-64' /boot/firmware/config.txt; then
+    echo "config.txt: dtoverlay=vc4-kms-v3d,cma-64 (64 MB CMA instead of 256 MB): takes effect at the next boot (old file in /boot/firmware/config.txt.pre-harden)"
+  else
+    echo "config.txt: could not set dtoverlay=vc4-kms-v3d,cma-64" >&2
+  fi
+elif grep -qx 'dtoverlay=vc4-kms-v3d,cma-64' /boot/firmware/config.txt; then
+  echo "config.txt: already dtoverlay=vc4-kms-v3d,cma-64 (64 MB CMA)"
+elif grep -q '^dtoverlay=vc4-kms-v3d' /boot/firmware/config.txt; then
+  echo "config.txt: vc4-kms-v3d overlay has its own parameters; CMA left unchanged"
+else
+  echo "config.txt: no vc4-kms-v3d overlay; CMA left unchanged"
 fi

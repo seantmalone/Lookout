@@ -25,6 +25,53 @@ describe('deploy scripts', () => {
     });
   }));
 
+  describe('harden.sh: 64 MB CMA instead of 256 MB (dtoverlay=vc4-kms-v3d,cma-64)', () => {
+    const harden = () => read('harden.sh');
+    const cmaSed = () => /^CMA_SED='([^']*)'$/m.exec(harden())[1];
+    const edit = (text) => {
+      const r = spawnSync('sed', [cmaSed()], { input: text, encoding: 'utf8' });
+      r.status.should.equal(0, r.stderr);
+      return r.stdout;
+    };
+
+    it('changes a line that is exactly dtoverlay=vc4-kms-v3d, and nothing else', () => {
+      edit('# comment\ndtparam=audio=on\ndtoverlay=vc4-kms-v3d\nmax_framebuffers=2\n')
+        .should.equal('# comment\ndtparam=audio=on\ndtoverlay=vc4-kms-v3d,cma-64\nmax_framebuffers=2\n');
+    });
+
+    it('is idempotent and leaves overlays with parameters, comments and other overlays alone', () => {
+      [
+        'dtoverlay=vc4-kms-v3d,cma-64\n',
+        'dtoverlay=vc4-kms-v3d,cma-128\n',
+        'dtoverlay=vc4-kms-v3d,noaudio\n',
+        '#dtoverlay=vc4-kms-v3d\n',
+        'dtoverlay=vc4-fkms-v3d\n',
+        'dtoverlay=vc4-kms-v3d-pi4\n',
+        ' dtoverlay=vc4-kms-v3d\n',
+        'dtparam=audio=on\n',
+      ].forEach((t) => edit(t).should.equal(t));
+      const once = edit('dtoverlay=vc4-kms-v3d\n');
+      edit(once).should.equal(once);
+    });
+
+    it('edits only when the exact line is there, with the boot partition writable just for that', () => {
+      const s = harden();
+      const step = s.slice(s.indexOf('# 5.'));
+      step.should.match(/if grep -qx 'dtoverlay=vc4-kms-v3d' \/boot\/firmware\/config\.txt; then/);
+      step.should.match(/with_boot_rw cma64_config/);
+      step.should.match(/next boot/);
+      const fn = /^with_boot_rw\(\) \{\n([\s\S]*?)\n\}$/m.exec(s)[1];
+      fn.should.match(/mount -o remount,rw \/boot\/firmware/);
+      fn.should.match(/mount -o remount,ro \/boot\/firmware/);
+    });
+
+    it('keeps a one-time backup next to config.txt, like /etc/fstab.pre-harden', () => {
+      const fn = /^cma64_config\(\) \{\n([\s\S]*?)\n\}$/m.exec(harden())[1];
+      fn.should.match(/\[ -e \/boot\/firmware\/config\.txt\.pre-harden \] \|\| cp \/boot\/firmware\/config\.txt \/boot\/firmware\/config\.txt\.pre-harden/);
+      fn.should.match(/sed -i "\$CMA_SED" \/boot\/firmware\/config\.txt/);
+    });
+  });
+
   describe('swap on a read-only card (rpi-swap: zram only, no swap file)', () => {
     const DROPIN = '/etc/rpi/swap.conf.d/90-g7-readonly.conf';
     const readonly = () => read('readonly.sh');
