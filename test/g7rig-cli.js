@@ -547,6 +547,40 @@ describe('g7-rig CLI', () => {
     JSON.parse(out).should.eql(record);
   });
 
+  describe('the stored pairing time (pairedAt)', () => {
+    const PAIRED = NOW - 3 * 60 * MIN;
+    const PAIRED_ISO = new Date(PAIRED).toISOString();
+
+    it('status reports paired_at as an ISO time when storage has pairedAt', async () => {
+      await seed(path.join(tmp, 'a', 'storage'), { pairedAt: PAIRED });
+      io = makeIo('a', fakeExec().exec);
+      (await run(['status'], io)).should.equal(0, err);
+      JSON.parse(out).sensor.paired_at.should.equal(PAIRED_ISO);
+    });
+
+    it('status reports paired_at as null when storage has none', async () => {
+      io = makeIo('a', fakeExec().exec);
+      (await run(['status'], io)).should.equal(0, err);
+      should(JSON.parse(out).sensor.paired_at).be.null();
+    });
+
+    it('export-key includes paired_at, and import-key carries it to the other collector', async () => {
+      await seed(path.join(tmp, 'a', 'storage'), { pairedAt: PAIRED });
+      io = makeIo('a', fakeExec().exec);
+      (await run(['export-key'], io)).should.equal(0, err);
+      const record = JSON.parse(out);
+      record.paired_at.should.equal(PAIRED_ISO);
+
+      io = makeIo('b', fakeExec().exec, JSON.stringify(record));
+      (await run(['import-key'], io)).should.equal(0, err);
+      (await readStore(path.join(tmp, 'b', 'storage'), ['pairedAt'])).pairedAt.should.equal(PAIRED);
+
+      io = makeIo('b', fakeExec().exec);
+      (await run(['status'], io)).should.equal(0, err);
+      JSON.parse(out).sensor.paired_at.should.equal(PAIRED_ISO);
+    });
+  });
+
   it('import-key keeps Lookout running when the record is bad, without echoing it', async () => {
     const b = fakeExec();
     io = makeIo('b', b.exec, `{"code":"12","name":"DXCMab","address":"AA:BB:CC:DD:EE:FF","key":"${KEY}"}`);

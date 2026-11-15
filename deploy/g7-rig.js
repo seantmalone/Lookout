@@ -43,7 +43,7 @@ const SCAN_SECONDS = 70;
 // --sensor_address pin (Lookout latches onto the address that authenticates)
 const collectorEnv = (text) => env.ensureDisplayType(withFleetFlags(env.removeSensorAddress(text)));
 const STORAGE_KEYS = ['id', 'sensorName', 'sensorKey', 'glucoseHist', 'sensorSeen',
-  'pairRequest', 'keyRejected', 'sensorStart', 'sessionLengthSeconds'];
+  'pairRequest', 'keyRejected', 'sensorStart', 'sessionLengthSeconds', 'pairedAt'];
 
 const fail = (message, exitCode = 1) => Object.assign(new Error(message), { exitCode });
 
