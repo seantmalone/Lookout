@@ -261,6 +261,127 @@ describe('g7-rig CLI', () => {
     should(lower).be.ok();
   });
 
+  describe('bt-watchdog (local only: g7-bt-watchdog.timer)', () => {
+    const ADVERTS = '> HCI Event: LE Meta Event (0x3e) plen 43\n      LE Advertising Report (0x02)\n';
+    const showDiscovering = {
+      code: 0, stdout: 'Controller 00:00:00:00:00:01 (public)\n\tPowered: yes\n\tDiscovering: yes\n', stderr: '',
+    };
+    const sample = (stdout) => ({ code: 124, stdout, stderr: '' }); // timeout(1) ends btmon: exit 124
+    let apply;
+
+    const watchIo = (overrides = {}) => {
+      const a = fakeExec({
+        'systemctl is-active bluetooth': { code: 0, stdout: 'active\n', stderr: '' },
+        'bluetoothctl show': showDiscovering,
+        'timeout 10 btmon': sample(''),
+        ...overrides,
+      });
+      io = makeIo('a', a.exec);
+      io.env.G7RIG_CENTRAL_APPLY = apply;
+      return a;
+    };
+    const lines = (a) => a.calls.map((c) => c.line);
+    const restarts = (a) => lines(a).filter((l) => l === 'systemctl restart bluetooth');
+
+    beforeEach(() => {
+      apply = path.join(tmp, 'g7-central-apply');
+      fs.writeFileSync(apply, '#!/bin/sh\n', { mode: 0o755 });
+    });
+
+    it('samples btmon for 10 s under timeout(1), with no terminal wrapper', async () => {
+      const a = watchIo({ 'timeout 10 btmon': sample(ADVERTS) });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      const call = a.calls.find((c) => c.line === 'timeout 10 btmon');
+      should(call).be.ok();
+      call.opts.timeoutMs.should.be.above(10000);
+      lines(a).filter((l) => l.startsWith('script')).should.eql([]);
+      restarts(a).should.eql([]);
+      out.should.equal('');
+    });
+
+    it('restarts Bluetooth after 3 empty samples in a row, then re-applies the fleet address', async () => {
+      const a = watchIo();
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      restarts(a).should.eql([]);
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.should.match(/no advertisements heard.*restarting bluetooth/);
+      out.trim().split('\n').filter((l) => /restarting bluetooth/.test(l)).length.should.equal(1);
+      const seq = lines(a);
+      const r = seq.indexOf('systemctl restart bluetooth');
+      r.should.be.above(-1);
+      seq.indexOf(apply).should.be.above(r);
+      restarts(a).length.should.equal(1);
+    });
+
+    it('a heard advertisement resets the count', async () => {
+      const a = watchIo();
+      await run(['bt-watchdog'], io);
+      await run(['bt-watchdog'], io);
+      const b = watchIo({ 'timeout 10 btmon': sample(ADVERTS) });
+      await run(['bt-watchdog'], io);
+      const c = watchIo();
+      await run(['bt-watchdog'], io);
+      await run(['bt-watchdog'], io);
+      [a, b, c].forEach((x) => restarts(x).should.eql([]));
+    });
+
+    it('restarts at most once an hour', async () => {
+      const a = watchIo();
+      for (let i = 0; i < 6; i += 1) (await run(['bt-watchdog'], io)).should.equal(0, err); // eslint-disable-line no-await-in-loop
+      restarts(a).length.should.equal(1);
+      io.now = () => NOW + 61 * MIN;
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      restarts(a).length.should.equal(2);
+    });
+
+    it('does not sample or act while bluetooth.service is not active', async () => {
+      const a = watchIo({ 'systemctl is-active bluetooth': { code: 3, stdout: 'inactive\n', stderr: '' } });
+      for (let i = 0; i < 4; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      lines(a).filter((l) => l.includes('btmon')).should.eql([]);
+      restarts(a).should.eql([]);
+    });
+
+    it('does not sample or act when the adapter is off or not discovering', async () => {
+      const off = watchIo({ 'bluetoothctl show': { code: 0, stdout: 'Controller 00:00:00:00:00:01 (public)\n\tPowered: no\n\tDiscovering: yes\n', stderr: '' } });
+      for (let i = 0; i < 4; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      const idle = watchIo({ 'bluetoothctl show': { code: 0, stdout: 'Controller 00:00:00:00:00:01 (public)\n\tPowered: yes\n\tDiscovering: no\n', stderr: '' } });
+      for (let i = 0; i < 4; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      [off, idle].forEach((x) => {
+        lines(x).filter((l) => l.includes('btmon')).should.eql([]);
+        restarts(x).should.eql([]);
+      });
+    });
+
+    it('a failed sample (btmon missing) is not counted as silence', async () => {
+      const a = watchIo({ 'timeout 10 btmon': { code: 127, stdout: '', stderr: 'timeout: failed to run command btmon' } });
+      for (let i = 0; i < 4; i += 1) (await run(['bt-watchdog'], io)).should.equal(0, err); // eslint-disable-line no-await-in-loop
+      restarts(a).should.eql([]);
+    });
+
+    it('skips the address step when g7-central-apply is not installed', async () => {
+      apply = path.join(tmp, 'not-installed');
+      const a = watchIo();
+      for (let i = 0; i < 3; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      restarts(a).length.should.equal(1);
+      lines(a).filter((l) => l.includes('central')).should.eql([]);
+    });
+
+    it('fails loudly (exit 1) if the restart fails, and still waits an hour before the next', async () => {
+      const a = watchIo({ 'systemctl restart bluetooth': { code: 1, stdout: '', stderr: 'Job failed' } });
+      for (let i = 0; i < 3; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      err.should.match(/restarting bluetooth failed/);
+      for (let i = 0; i < 3; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      restarts(a).length.should.equal(1);
+    });
+
+    it('is not reachable through the remote wrapper rules', async () => {
+      const a = watchIo();
+      (await run(['bt-watchdog', 'now'], io)).should.equal(2);
+      a.calls.should.eql([]);
+    });
+  });
+
   describe('the central Bluetooth address (the sensor only accepts the key from it)', () => {
     const show = (mac) => ({ code: 0, stdout: `Controller ${mac} (public)\n\tPowered: yes\n`, stderr: '' });
 

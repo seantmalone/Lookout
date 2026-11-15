@@ -47,10 +47,12 @@ PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
   /etc/systemd/system/bluetooth.service.d /etc/systemd/system/g7-central.service
   /etc/systemd/system/g7-persist.service /etc/systemd/system/g7-persist.path
   /etc/systemd/system/g7-persist.timer /etc/systemd/system/systemd-remount-fs.service.d
+  /etc/systemd/system/g7-bt-watchdog.service /etc/systemd/system/g7-bt-watchdog.timer
   /etc/systemd/system/multi-user.target.wants/lookout.service
   /etc/systemd/system/multi-user.target.wants/g7-central.service
   /etc/systemd/system/multi-user.target.wants/g7-persist.path
-  /etc/systemd/system/timers.target.wants/g7-persist.timer"
+  /etc/systemd/system/timers.target.wants/g7-persist.timer
+  /etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer"
 for p in $PATHS; do
   if [ -e "$p" ] || [ -L "$p" ]; then cp -a --parents "$p" "$STAGE/root/"; fi
 done

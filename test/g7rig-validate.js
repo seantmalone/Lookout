@@ -53,6 +53,9 @@ describe('g7-rig validate.parseRemote', () => {
     '`id`',
     'cat /etc/shadow',
     'STATUS',
+    // local-only commands (systemd units on the collector itself)
+    'persist',
+    'bt-watchdog',
   ];
 
   rejected.forEach((cmdline) => {

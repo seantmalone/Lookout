@@ -1,0 +1,16 @@
+# Restart Bluetooth when the adapter says it is discovering but hears no
+# advertisements (g7-rig bt-watchdog; the decision is lib/g7rig/btwatch.js).
+# Seen after kernel out-of-memory kills on a Pi Zero W: BlueZ reported
+# "Discovering: yes" while btmon showed no advertising reports for six hours,
+# until bluetooth was restarted. Installed by deploy/install.sh, which fills
+# in @NODE_BIN@; run every 5 minutes by g7-bt-watchdog.timer.
+[Unit]
+Description=Restart Bluetooth if it is discovering but hears nothing (g7-rig bt-watchdog)
+After=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=@NODE_BIN@/node /usr/local/sbin/g7-rig.js bt-watchdog
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=3min

@@ -1,0 +1,9 @@
+[Unit]
+Description=Check every 5 minutes that Bluetooth still hears advertisements (g7-bt-watchdog)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

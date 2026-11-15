@@ -29,8 +29,12 @@ install -o root -g root -m 755 "$HERE/g7-rig-remote.sh" /usr/local/sbin/g7-rig-r
 # shared Bluetooth address (/etc/g7-central, written by g7-rig import-key)
 install -o root -g root -m 755 "$HERE/g7-central-apply.sh" /usr/local/sbin/g7-central-apply
 install -m 644 "$HERE/systemd/g7-central.service" /etc/systemd/system/g7-central.service
+# Bluetooth watchdog: restarts bluetooth when discovering hears nothing
+sed "s#@NODE_BIN@#$NODE_BIN#g" "$HERE/systemd/g7-bt-watchdog.service" > /etc/systemd/system/g7-bt-watchdog.service
+install -m 644 "$HERE/systemd/g7-bt-watchdog.timer" /etc/systemd/system/g7-bt-watchdog.timer
 systemctl daemon-reload
 systemctl enable g7-central.service >/dev/null 2>&1 || true
+systemctl enable --now g7-bt-watchdog.timer >/dev/null
 systemctl restart bluetooth
 if [ "${1:-}" = "--enable" ]; then systemctl enable --now lookout; fi
-echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig"
+echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer"

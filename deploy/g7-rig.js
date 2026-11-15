@@ -9,6 +9,10 @@
 //   g7-rig.js export-key          {code, name, address, key, central?, paired_at?}
 //   g7-rig.js import-key          read that record on stdin and install it
 //
+// Local only (systemd units on the collector; g7-rig-remote never passes them):
+//   g7-rig.js persist             copy what must survive onto the read-only card
+//   g7-rig.js bt-watchdog         restart Bluetooth if it is discovering but deaf
+//
 // Exit codes: 0 ok, 1 error, 2 rejected command, 3 refused (medical slot).
 // Test overrides: G7RIG_STORAGE (storage dir), G7RIG_ENV (env file), G7RIG_CACHE (cache dir).
 
@@ -27,6 +31,7 @@ const { planSync, applySync, bondAddress } = require('../lib/g7rig/persist');
 const central = require('../lib/g7rig/central');
 const keyfile = require('../lib/g7rig/keyfile');
 const { parseScan } = require('../lib/g7rig/scan');
+const btwatch = require('../lib/g7rig/btwatch');
 
 const ENV_FILE = '/etc/lookout.env';
 // fleet collectors: never pair on their own, and never reboot on missed reads
@@ -348,11 +353,80 @@ const recentErrorsCached = async (io) => {
   return errors;
 };
 
+// Bluetooth watchdog (lib/g7rig/btwatch.js): state in /run, so a reboot
+// starts clean.
+const centralApplyPath = (io) => io.env.G7RIG_CENTRAL_APPLY || '/usr/local/sbin/g7-central-apply';
+
+const readWatchState = (file) => {
+  try {
+    return btwatch.parseState(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    return btwatch.parseState(null);
+  }
+};
+
+const writeWatchState = (file, state) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify(state), { mode: 0o600 });
+  fs.renameSync(`${file}.tmp`, file);
+};
+
+// Is the adapter discovering? (bluetooth.service active, powered, Discovering: yes)
+const btDiscovering = async (io) => {
+  const active = await io.exec('systemctl', ['is-active', 'bluetooth']);
+  if (active.code !== 0 || active.stdout.trim() !== 'active') return false;
+  const show = await io.exec('bluetoothctl', ['show'], { timeoutMs: 15000 });
+  if (show.code !== 0) return false;
+  const a = btwatch.adapterState(show.stdout);
+  return a.powered && a.discovering;
+};
+
+// Advertising reports heard in SAMPLE_SECONDS of btmon, or null if btmon did
+// not run. btmon needs no terminal; timeout(1) ends it (exit 124).
+const sampleAdverts = async (io) => {
+  const s = btwatch.SAMPLE_SECONDS;
+  const mon = await io.exec('timeout', [String(s), 'btmon'], { timeoutMs: (s + 10) * 1000 });
+  if (mon.code !== 0 && mon.code !== 124) return null;
+  return btwatch.countAdverts(mon.stdout);
+};
+
+const btWatchdog = async (io) => {
+  const file = path.join(cacheDir(io), 'btwatch.json');
+  const prev = readWatchState(file);
+  const discovering = await btDiscovering(io);
+  const adverts = discovering ? await sampleAdverts(io) : null;
+  const d = btwatch.decide({
+    discovering, adverts, ...prev, now: io.now(),
+  });
+  // saved before acting, so a failing restart is still limited to one an hour
+  writeWatchState(file, d.state);
+  if (d.reason === 'miss') {
+    io.stdout(`bt-watchdog: discovering but no advertisements heard in ${btwatch.SAMPLE_SECONDS} s (${d.state.misses} of ${btwatch.MISSES_TO_ACT})\n`);
+  } else if (d.reason === 'rate-limited') {
+    const min = Math.round((io.now() - prev.lastRestart) / 60000);
+    io.stdout(`bt-watchdog: still no advertisements; not restarting again yet (last restart ${min} min ago, at most one per hour)\n`);
+  }
+  if (!d.act) return;
+  io.stdout(`bt-watchdog: adapter discovering but no advertisements heard in ${btwatch.MISSES_TO_ACT} samples of ${btwatch.SAMPLE_SECONDS} s; restarting bluetooth\n`);
+  await mustRun(io, 'systemctl', ['restart', 'bluetooth'], 'restarting bluetooth');
+  // the fleet's shared address (g7-central-apply waits for the adapter itself)
+  const apply = centralApplyPath(io);
+  if (fs.existsSync(apply)) {
+    const r = await io.exec(apply, [], { timeoutMs: 120000 });
+    if (r.code !== 0) io.stderr(`bt-watchdog: g7-central-apply failed: ${lastLine(r.stderr) || `exit ${r.code}`}\n`);
+  }
+};
+
+const LOCAL_COMMANDS = ['persist', 'bt-watchdog'];
+
 const commands = {
   // local only (not allowed through g7-rig-remote): run by g7-persist.service
   persist: async (io) => {
     printJson(io, await persistNow(io));
   },
+
+  // local only: run by g7-bt-watchdog.service every 5 minutes
+  'bt-watchdog': btWatchdog,
 
   status: async (io) => {
     const dir = await lookoutDir(io);
@@ -479,8 +553,9 @@ const commands = {
 const run = async (argv, io) => {
   let parsed;
   try {
-    // `persist` is local only: g7-rig-remote never passes it
-    parsed = argv.join(' ') === 'persist' ? { cmd: 'persist', args: [] } : parseRemote(argv.join(' '));
+    // local-only commands: g7-rig-remote never passes them
+    const line = argv.join(' ');
+    parsed = LOCAL_COMMANDS.includes(line) ? { cmd: line, args: [] } : parseRemote(line);
   } catch (e) {
     io.stderr('rejected\n');
     return 2;
