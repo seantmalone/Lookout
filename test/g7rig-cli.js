@@ -231,6 +231,37 @@ describe('g7-rig CLI', () => {
     tries.should.equal(3);
   });
 
+  it('persist drops the caches once when the relock keeps failing', async () => {
+    const lower = path.join(tmp, 'card');
+    let dropped = false;
+    let tries = 0;
+    const a = fakeExec({
+      'findmnt -no FSTYPE /': { code: 0, stdout: 'overlay\n', stderr: '' },
+      [`findmnt -no TARGET ${lower}`]: { code: 0, stdout: `${lower}\n`, stderr: '' },
+    });
+    const exec = async (cmd, args = [], opts = {}) => {
+      const line = [cmd, ...args].join(' ');
+      if (line === 'sh -c echo 2 > /proc/sys/vm/drop_caches') {
+        a.calls.push({ line, opts });
+        dropped = true;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (line === `mount -o remount,ro ${lower}`) {
+        tries += 1;
+        a.calls.push({ line, opts });
+        return dropped ? { code: 0, stdout: '', stderr: '' } : { code: 32, stdout: '', stderr: 'mount point is busy' };
+      }
+      if (line === `findmnt -no OPTIONS ${lower}`) return { code: 0, stdout: dropped ? 'ro,relatime\n' : 'rw,relatime\n', stderr: '' };
+      return a.exec(cmd, args, opts);
+    };
+    io = makeIo('a', exec);
+    io.env.G7RIG_LOWER = lower;
+    io.sleep = async () => {};
+    (await run(['persist'], io)).should.equal(0, err);
+    tries.should.equal(6);
+    a.calls.filter((c) => c.line.includes('drop_caches')).length.should.equal(1);
+  });
+
   it('persist fails loudly if the card cannot be relocked', async () => {
     const lower = path.join(tmp, 'card');
     const a = fakeExec({

@@ -116,6 +116,13 @@ describe('deploy scripts', () => {
       relock.should.be.above(rm);
       s.indexOf('[ -e /media/root-ro/var/swap ]', relock).should.be.above(relock);
     });
+
+    it('update-readonly.sh drops the caches after removing the swap file and in relock', () => {
+      const s = read('update-readonly.sh');
+      s.should.match(/echo 2 > \/proc\/sys\/vm\/drop_caches 2>\/dev\/null \|\| true/);
+      s.should.match(/rm -f \/media\/root-ro\/var\/swap\n\s*drop_caches/);
+      s.should.match(/relock\(\) \{[\s\S]*?\[ \$i -eq 5 \] && drop_caches[\s\S]*?\n\}/);
+    });
   });
 
   describe('g7-bt-watchdog units', () => {

@@ -147,7 +147,11 @@ What the scripts do now:
   itself, never through the overlay: by `readonly.sh enable` (`/var/swap`,
   while the card is still writable) and by `update-readonly.sh`
   (`/media/root-ro/var/swap`, in its unlocked window, checked after
-  relocking). `update-readonly.sh` also copies the drop-in to the card.
+  relocking). If a deleted file was cached by the overlay, the
+  card stays "unlinked but in use" and every relock fails with "mount point
+  is busy" ("the card is still writable"); `sync; echo 2 >
+  /proc/sys/vm/drop_caches` releases it, which `update-readonly.sh` and
+  `g7-rig persist` now do themselves. `update-readonly.sh` also copies the drop-in to the card.
   `readonly.sh status` shows the mechanism and whether the card still has a
   swap file. Takes effect at the next boot.
 - **CMA: 64 MB.** `harden.sh` changes a line that is exactly

@@ -18,9 +18,19 @@ L=/media/root-ro
 sh "$HERE/install.sh"
 sh "$HERE/readonly.sh" units
 
+# Release cached dentries/inodes. A file deleted on the card that the overlay
+# still has cached (it was opened through the overlay) stays "unlinked but in
+# use" on the card, and the kernel then refuses every remount to read-only
+# ("mount point is busy") even though no process has it open.
+drop_caches() {
+  sync
+  echo 2 > /proc/sys/vm/drop_caches 2>/dev/null || true
+}
+
 relock() {
   i=0
   while [ $i -lt 60 ]; do              # "busy" right after many writes can last a while
+    [ $i -eq 5 ] && drop_caches        # once: a deleted file the overlay cached
     sync
     mount -o remount,ro "$L" 2>/dev/null || true
     [ "$(findmnt -no OPTIONS "$L" | cut -d, -f1)" = ro ] && return 0
@@ -81,6 +91,7 @@ for p in $PATHS; do
 done
 if [ "$RM_SWAP" = yes ]; then
   rm -f /media/root-ro/var/swap
+  drop_caches                          # else the cached swap file blocks the relock
 fi
 trap - EXIT
 relock

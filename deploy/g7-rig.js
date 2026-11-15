@@ -268,11 +268,22 @@ const withLock = async (io, fn) => {
 // "busy" right after many writes can last tens of seconds
 const RELOCK_TRIES = 60;
 
+// After this many failed tries, drop the dentry/inode caches once.
+const RELOCK_DROP_AFTER = 5;
+
 // Make the card read-only again, retrying: a remount right after writing can
 // briefly fail with "mount point is busy". Verified against the mount table.
+// persist deletes files on the card (scratch storage files, stale bonds); if
+// the overlay still has one cached, it stays "unlinked but in use" on the card
+// and every remount to read-only fails until the caches are dropped.
 const relock = async (io, lower) => {
   const sleep = io.sleep || ((ms) => new Promise((r) => { setTimeout(r, ms); }));
   for (let i = 0; i < RELOCK_TRIES; i += 1) {
+    if (i === RELOCK_DROP_AFTER) {
+      await io.exec('sync', []); // eslint-disable-line no-await-in-loop
+      // failure tolerated: the retries go on either way
+      await io.exec('sh', ['-c', 'echo 2 > /proc/sys/vm/drop_caches']); // eslint-disable-line no-await-in-loop
+    }
     await io.exec('sync', []); // eslint-disable-line no-await-in-loop
     await io.exec('mount', ['-o', 'remount,ro', lower]); // eslint-disable-line no-await-in-loop
     const opts = await io.exec('findmnt', ['-no', 'OPTIONS', lower]); // eslint-disable-line no-await-in-loop
