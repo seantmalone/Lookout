@@ -9,7 +9,7 @@ own connections.
 
 ```sh
 cd ~/src/Lookout && npm install
-sudo deploy/install.sh          # units, Bluetooth fix, g7-rig
+sudo deploy/install.sh          # units, Bluetooth fix, g7-rig, Bluetooth watchdog
 sudoedit /etc/lookout.env       # Nightscout host and secret
 sudo systemctl enable --now lookout
 lookout id <code>
@@ -96,7 +96,7 @@ losing power at any moment.
 
 1. `sudo deploy/harden.sh`: logs in RAM, no unattended apt/man-db activity
    (a power cut mid-upgrade can break dpkg), boot partition read-only,
-   automatic fsck at boot. Lookout and g7-rig already write their data
+   automatic fsck at boot, 64 MB CMA instead of 256 MB (see below). Lookout and g7-rig already write their data
    crash-safely (temp file, fsync, rename, fsync the directory).
 2. `sudo deploy/readonly.sh enable --reboot`: the whole SD card becomes
    read-only (overlayroot); everything written while running goes to RAM.
@@ -114,6 +114,104 @@ losing power at any moment.
    `sudo deploy/readonly.sh status` shows the state. To update software:
    `sudo deploy/readonly.sh disable --reboot`, update, then
    `sudo deploy/readonly.sh enable --reboot`.
+
+### Memory on a read-only card (found 2026-11-15)
+
+What went wrong, on both collectors (Raspberry Pi OS 13, read-only card,
+RAM overlay of about 214 MB):
+
+- **Swap file resize loop.** rpi-swap 1.2.4 defaults to `Mechanism=auto`
+  (zram plus a swap file). The card still held a 426 MB `/var/swap` from
+  before read-only mode. `rpi-resize-swap-file.service` tried to resize it
+  about once a minute, forever: opening it for writing through the overlay
+  copies it into the RAM overlay, which fills up, and it fails with
+  `truncate: cannot open '/var/swap' for writing: No space left on device`
+  (1,022 times in 23 hours on one Pi). Each try cost about 9 s of CPU on the
+  single core and a spike of about 200 MB of RAM (shmem).
+- **CMA.** `dtoverlay=vc4-kms-v3d` in `/boot/firmware/config.txt` reserves
+  256 MB of the Pi's 437 MB as CMA (`CmaTotal: 262144 kB`). The kernel's own
+  allocations cannot use it, so during those spikes the kernel ran out:
+  18 oom-killer kills in a day on one Pi.
+- **Deaf Bluetooth.** After one such burst the adapter delivered no
+  advertisements at all for six hours (BlueZ still said `Discovering: yes`;
+  `btmon` showed no "LE Advertising Report" in 12 s), so Lookout read
+  nothing. `systemctl restart bluetooth` fixed it: the adapter kept the
+  fleet address and heard 718 advertisements in 20 s.
+
+What the scripts do now:
+
+- **Swap: zram only.** `readonly.sh enable` and `readonly.sh units` (run by
+  `update-readonly.sh`) write `/etc/rpi/swap.conf.d/90-g7-readonly.conf`
+  (`[Main]` / `Mechanism=zram`) when rpi-swap is installed. With `zram`,
+  rpi-swap uses no swap file. The old swap file is deleted from the card
+  itself, never through the overlay: by `readonly.sh enable` (`/var/swap`,
+  while the card is still writable) and by `update-readonly.sh`
+  (`/media/root-ro/var/swap`, in its unlocked window, checked after
+  relocking). `update-readonly.sh` also copies the drop-in to the card.
+  `readonly.sh status` shows the mechanism and whether the card still has a
+  swap file. Takes effect at the next boot.
+- **CMA: 64 MB.** `harden.sh` changes a line that is exactly
+  `dtoverlay=vc4-kms-v3d` to `dtoverlay=vc4-kms-v3d,cma-64` (the collectors
+  use no HDMI; the display is an SPI TFT). It leaves an overlay line with
+  parameters alone, keeps the old file once as
+  `/boot/firmware/config.txt.pre-harden`, and the boot partition read-only.
+  Takes effect at the next boot.
+- **Bluetooth watchdog.** `g7-bt-watchdog.timer` (installed and enabled by
+  `install.sh`, copied to the card by `update-readonly.sh`) runs
+  `g7-rig.js bt-watchdog` every 5 minutes at nice 19. When
+  `bluetooth.service` is active and the adapter is powered and discovering,
+  it counts "LE Advertising Report" / "LE Extended Advertising Report" lines
+  in 10 s of `btmon` (under `timeout`). After 3 empty samples in a row it
+  logs one line, runs `systemctl restart bluetooth` and then
+  `g7-central-apply` (if installed) for the fleet address. At most one
+  restart an hour; its state is in `/run/g7-rig/btwatch.json` (cleared at
+  reboot). A failed `btmon` does not count as an empty sample.
+
+Applying it to a collector that is already read-only: copy the checkout to
+the Pi, then `sudo deploy/update-readonly.sh`, `sudo deploy/harden.sh`,
+`sudo reboot`. The watchdog runs without a reboot; swap and CMA change at
+the reboot.
+
+Checking a device (after the reboot):
+
+```sh
+journalctl -u rpi-resize-swap-file.service --since -10min   # no truncate / "No space left" lines
+grep -E "CmaTotal|Shmem" /proc/meminfo                       # CmaTotal: 65536 kB
+sudo dmesg | grep -c "Out of memory"                         # 0 (this boot)
+swapon --show; sudo deploy/readonly.sh status                # zram only, no card swap file
+systemctl list-timers g7-bt-watchdog.timer
+journalctl -u g7-bt-watchdog.service --since -1h             # quiet unless it misses or restarts
+```
+
+The watchdog logs nothing while advertisements are heard, a line per empty
+sample (`... (1 of 3)`), and on acting: `bt-watchdog: adapter discovering
+but no advertisements heard in 3 samples of 10 s; restarting bluetooth`.
+
+Undoing each change (on a read-only card, files under `/media/root-ro` are
+changed with the card unlocked: `sudo mount -o remount,rw /media/root-ro`,
+change, `sudo mount -o remount,ro /media/root-ro`):
+
+- Swap: delete `/etc/rpi/swap.conf.d/90-g7-readonly.conf` (on a read-only
+  card: `/media/root-ro/etc/rpi/swap.conf.d/90-g7-readonly.conf`) and
+  reboot. rpi-swap then goes back to its default and creates a swap file
+  again, which on a read-only card brings the resize loop back.
+  `readonly.sh enable` / `units` (and so `update-readonly.sh`) write the
+  drop-in again.
+- CMA: `sudo mount -o remount,rw /boot/firmware`, change the line back to
+  `dtoverlay=vc4-kms-v3d` (or copy `config.txt.pre-harden` over
+  `config.txt`), `sudo mount -o remount,ro /boot/firmware`, reboot.
+  `harden.sh` changes it again if run.
+- Watchdog: `sudo systemctl disable --now g7-bt-watchdog.timer`; on a
+  read-only card also delete
+  `/media/root-ro/etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer`.
+  `install.sh` (and so `update-readonly.sh`) enables it again.
+
+Verified here: the watchdog decision and command sequence (unit tests with a
+fake `exec`), the CMA edit on sample config files, `sh -n` of every script.
+Checked on the devices before the change: the numbers above, `swap.conf(5)`
+(Mechanism values, drop-ins in `/etc/rpi/swap.conf.d/`, zram removes any
+existing file) and that the vc4-kms-v3d overlay accepts `cma-64`.
+Verified on the devices: <to be filled in after deployment>
 
 ## Watching it
 
