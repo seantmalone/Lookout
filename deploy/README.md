@@ -9,7 +9,7 @@ own connections.
 
 ```sh
 cd ~/src/Lookout && npm install
-sudo deploy/install.sh          # units, Bluetooth fix, g7-rig, Bluetooth watchdog
+sudo deploy/install.sh          # units, Bluetooth fix, g7-rig, Bluetooth and alive watchdogs
 sudoedit /etc/lookout.env       # Nightscout host and secret
 sudo systemctl enable --now lookout
 lookout id <code>
@@ -75,8 +75,10 @@ The setup script creates the user `g7rig`, whose key may only run
 else (exit 2).
 
 - `status` prints JSON: the sensor, last reading, last heard, the pairing
-  state and recent errors. It shows only a fingerprint of the key (the
-  first 12 hex characters of its SHA-256), never the key.
+  state, recent errors and `health` (load, memory, swap, RAM overlay,
+  throttling: see "A collector that stalled" below). It shows only a
+  fingerprint of the key (the first 12 hex characters of its SHA-256),
+  never the key.
 - `pair NNNN` stores the code, clears the old key, name, calibration and
   Bluetooth bond, removes any `--sensor_address` pin, and asks Lookout
   (which runs with `--no_auto_pair`) to pair with the sensor that accepts the
@@ -140,10 +142,11 @@ RAM overlay of about 214 MB):
 
 What the scripts do now:
 
-- **Swap: zram only.** `readonly.sh enable` and `readonly.sh units` (run by
+- **Swap: no swap file.** `readonly.sh enable` and `readonly.sh units` (run by
   `update-readonly.sh`) write `/etc/rpi/swap.conf.d/90-g7-readonly.conf`
-  (`[Main]` / `Mechanism=zram`) when rpi-swap is installed. With `zram`,
-  rpi-swap uses no swap file. The old swap file is deleted from the card
+  when rpi-swap is installed. It said `Mechanism=zram` at first (no swap
+  file, zram only); since 2026-11-19 it says `Mechanism=none`, no swap at all
+  (see "A collector that stalled" below). The old swap file is deleted from the card
   itself, never through the overlay: by `readonly.sh enable` (`/var/swap`,
   while the card is still writable) and by `update-readonly.sh`
   (`/media/root-ro/var/swap`, in its unlocked window, checked after
@@ -182,7 +185,7 @@ Checking a device (after the reboot):
 journalctl -u rpi-resize-swap-file.service --since -10min   # no truncate / "No space left" lines
 grep -E "CmaTotal|Shmem" /proc/meminfo                       # CmaTotal: 65536 kB
 sudo dmesg | grep -c "Out of memory"                         # 0 (this boot)
-swapon --show; sudo deploy/readonly.sh status                # zram only, no card swap file
+swapon --show; sudo deploy/readonly.sh status                # no swap (was: zram only), no card swap file
 systemctl list-timers g7-bt-watchdog.timer
 journalctl -u g7-bt-watchdog.service --since -1h             # quiet unless it misses or restarts
 ```
@@ -209,6 +212,7 @@ change, `sudo mount -o remount,ro /media/root-ro`):
   read-only card also delete
   `/media/root-ro/etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer`.
   `install.sh` (and so `update-readonly.sh`) enables it again.
+- The alive watchdog: see "A collector that stalled" below.
 
 Verified here: the watchdog decision and command sequence (unit tests with a
 fake `exec`), the CMA edit on sample config files, `sh -n` of every script.
@@ -224,6 +228,108 @@ On the first device the card would not relock after the swap file was deleted un
 caches were dropped by hand; the scripts now do that, and the second device relocked by
 itself. Not yet verified: readings after the change (the sensor was out of range of both
 devices at the time), and the watchdog actually restarting Bluetooth on a deaf adapter.
+
+### A collector that stalled (2026-11-19)
+
+What happened: one collector was unresponsive for more than 31 hours, until
+it was power-cycled. The fleet UI's SSH polling connected each time but got
+no answer within 20 s. systemd's hardware watchdog (`RuntimeWatchdogSec=1min`)
+never fired, so the kernel and PID 1 were alive while the rest of userspace
+was stalled. Its logs were in RAM, so **the cause is unknown**. Two
+candidates: the SD card stopped answering reads, or memory thrash (a zram
+swap as large as RAM had been enabled a few days earlier, which lets a Pi
+grind instead of failing fast).
+
+Three measures:
+
+- **`health` in `g7-rig status`**, for the fleet UI to show and record:
+
+  ```json
+  "health": {"load1": 0.93, "mem_total_kb": 437312, "mem_available_kb": 262292,
+             "swap_total_kb": 0, "swap_used_kb": 0, "overlay_used_kb": 1640,
+             "overlay_total_kb": 219136, "throttled": "0x0"}
+  ```
+
+  `load1` from `/proc/loadavg`; memory and swap in kB from `/proc/meminfo`
+  (`swap_used_kb` = SwapTotal - SwapFree); `overlay_*` = kB used/total of the
+  RAM overlay at `/media/root-rw` (null when the card is not read-only);
+  `throttled` = what `vcgencmd get_throttled` prints (non-zero bits mean
+  under-voltage or throttling, now or since boot; null without vcgencmd).
+  Any field that cannot be read is null; status never fails because of it.
+  The only extra cost is one `vcgencmd` run and a statfs.
+- **The alive watchdog** (`g7-alive.service`, script
+  `/usr/local/sbin/g7-alive`, installed and enabled by `install.sh`, copied
+  to the card by `update-readonly.sh`). Every 30 s it runs a program
+  (`date`), reads one 4 KiB block straight from the card
+  (`dd if=/dev/mmcblk0 ... iflag=direct` under `timeout 60`, so the page
+  cache cannot answer for it; a different block in the first 16 MB each
+  time), and only if both worked tells systemd `WATCHDOG=1`. A read error
+  is logged as one line, a read with no answer as "no answer"; neither
+  notifies. With no notification for 5 minutes (`WatchdogSec=300`) systemd
+  kills the service (result `watchdog`) and `FailureAction=reboot-immediate`
+  reboots at once, without a clean shutdown: the card is read-only, so
+  nothing can be corrupted, and the RAM overlay is lost at any reboot. It
+  runs at `Nice=-5`, is shielded from the OOM killer, and does not depend on
+  Lookout or Bluetooth. The card device is the disk under `/media/root-ro`
+  (else under `/`); if it cannot be found, or cannot be read when the
+  service starts, it logs that once and checks only that programs start (so
+  a wrong device cannot cause a reboot loop). A clean stop
+  (`systemctl stop`/`restart`, shutdown) is not a failure; any other end of
+  the service (`kill -9`, a crash) reboots too. If PID 1 itself stalls, the
+  hardware watchdog still reboots.
+  - Turn it off: `sudo systemctl disable --now g7-alive.service`. On a
+    read-only card that lasts until the next boot; to keep it off, also
+    delete `/media/root-ro/etc/systemd/system/multi-user.target.wants/g7-alive.service`
+    with the card unlocked. `install.sh` (and so `update-readonly.sh`)
+    enables it again. If it ever reboots a healthy device, run
+    `sudo systemctl stop g7-alive` within 5 minutes of boot, then remove
+    that link.
+- **Swap off.** The rpi-swap drop-in now says `Mechanism=none` (no zram, no
+  swap file). About 255 MB is free in normal running, so swap buys little,
+  and without it a runaway process is killed by the OOM killer quickly
+  instead of the device grinding; the alive watchdog covers the rest. A
+  device with the earlier zram drop-in gets the new one from
+  `update-readonly.sh` (it runs `readonly.sh units`, which rewrites it, and
+  copies it to the card). Takes effect at the next boot.
+
+Applying it to a read-only collector: copy the checkout to the Pi, then
+`sudo deploy/update-readonly.sh` (health and the alive watchdog work at
+once; the watchdog is restarted by `install.sh`), then `sudo reboot` (swap
+off).
+
+Checking a device:
+
+```sh
+sudo "$(command -v node)" /usr/local/sbin/g7-rig.js status   # "health": {...}, swap 0, throttled "0x0"
+systemctl status g7-alive                                    # active (running)
+journalctl -u g7-alive -b         # "card check: one direct read from /dev/mmcblk0 every 30 s"
+systemctl show g7-alive -p WatchdogTimestamp                 # at most 30 s old
+swapon --show; grep Swap /proc/meminfo                       # nothing; SwapTotal: 0 kB
+sudo deploy/readonly.sh status    # "swap: off (Mechanism=none)", "swap in use: none"
+```
+
+Testing the alive watchdog (watch `journalctl -u g7-alive -f` from a second
+SSH session; the journal is in RAM and gone after the reboot):
+
+- Freeze it: `sudo kill -STOP "$(systemctl show -p MainPID --value g7-alive)"`.
+  Nothing for 4.5 to 5 minutes, then `Watchdog timeout (limit 5min)!`,
+  `Killing process ... with signal SIGKILL`, `Failed with result 'watchdog'`,
+  and the Pi reboots at once (the SSH sessions just drop). Afterwards
+  `uptime` is a few minutes and `g7-alive` is running again.
+- Stop it: `sudo systemctl stop g7-alive`. The log shows `stopped` and
+  `Deactivated successfully`; no reboot; `systemctl is-failed g7-alive` says
+  `inactive`. `sudo systemctl start g7-alive` arms it again (so does a
+  reboot).
+
+Verified here: the health parsing and the status JSON (unit tests with real
+`/proc` text and a fake `exec`), the alive script's rounds with stubbed
+commands under sh and dash (good round notifies; failed exec, read error or
+read with no answer does not; no device still notifies; READY=1, a clean
+exit on SIGTERM), the swap drop-in rewrite and `readonly.sh status` output
+on scratch files, `sh -n` of every script. Not verified without a device:
+systemd's handling of the unit (notify, watchdog expiry, reboot-immediate,
+clean stop), the device found on a real Pi, and direct reads from the card.
+Verified on the devices: <to be filled in after deployment>
 
 ## Watching it
 
