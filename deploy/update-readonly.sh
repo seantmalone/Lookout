@@ -5,9 +5,10 @@
 # It installs everything on the running system (install.sh), then unlocks the
 # card, mirrors Lookout's code and the installed files onto it, and relocks it
 # (verified). Lookout's storage and the env file are left to g7-rig persist.
-# With rpi-swap set to zram only (readonly.sh units), it also deletes the old
-# swap file from the card itself (/media/root-ro/var/swap), never through the
-# overlay. The swap change takes effect at the next reboot.
+# With rpi-swap set to no swap (readonly.sh units rewrites the drop-in, also
+# over the earlier zram-only one), it also deletes the old swap file from the
+# card itself (/media/root-ro/var/swap), never through the overlay. The swap
+# change takes effect at the next reboot.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -73,7 +74,7 @@ for p in $PATHS; do
   if [ -e "$p" ] || [ -L "$p" ]; then cp -a --parents "$p" "$STAGE/root/"; fi
 done
 
-# The old swap file on the card: rpi-swap now uses zram only (the drop-in
+# The old swap file on the card: rpi-swap now uses no swap (the drop-in
 # above). Decided before unlocking; literal paths only.
 RM_SWAP=no
 if [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ] && [ -f /media/root-ro/var/swap ] && [ ! -L /media/root-ro/var/swap ]; then
@@ -112,7 +113,7 @@ if [ "$RM_SWAP" = yes ]; then
   if [ -e /media/root-ro/var/swap ]; then
     echo "card still has its swap file: /media/root-ro/var/swap" >&2; bad=1
   else
-    echo "removed the old swap file from the card (/var/swap); zram only from the next reboot"
+    echo "removed the old swap file from the card (/var/swap); no swap from the next reboot"
   fi
 fi
 rm -rf "$STAGE"

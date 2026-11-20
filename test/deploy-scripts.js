@@ -2,8 +2,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawnSync } = require('child_process');
-require('should');
+const should = require('should');
 
 const DEPLOY = path.join(__dirname, '..', 'deploy');
 const read = (f) => fs.readFileSync(path.join(DEPLOY, f), 'utf8');
@@ -72,25 +73,93 @@ describe('deploy scripts', () => {
     });
   });
 
-  describe('swap on a read-only card (rpi-swap: zram only, no swap file)', () => {
+  describe('swap on a read-only card (rpi-swap: Mechanism=none, no swap at all)', () => {
     const DROPIN = '/etc/rpi/swap.conf.d/90-g7-readonly.conf';
     const readonly = () => read('readonly.sh');
+    const shFunction = (name) => {
+      const m = new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}$`, 'm').exec(readonly());
+      if (!m) throw new Error(`no ${name}() in readonly.sh`);
+      return m[0];
+    };
 
-    it('readonly.sh writes the drop-in only when rpi-swap is installed', () => {
-      const s = readonly();
-      const fn = /^swap_zram_only\(\) \{\n([\s\S]*?)\n\}$/m.exec(s);
-      fn.should.be.ok();
-      fn[1].should.match(/\[ -f \/etc\/rpi\/swap\.conf \] \|\| \{/);
-      fn[1].should.containEql(DROPIN);
-      const body = /<<'SWAP'\n([\s\S]*?)\nSWAP\n/.exec(fn[1])[1].split('\n');
-      body.filter((l) => !l.startsWith('#')).should.eql(['[Main]', 'Mechanism=zram']);
+    it('readonly.sh writes the drop-in only when rpi-swap is installed: [Main] / Mechanism=none', () => {
+      const fn = shFunction('swap_off');
+      fn.should.match(/\[ -f \/etc\/rpi\/swap\.conf \] \|\| \{/);
+      fn.should.containEql(DROPIN);
+      const body = /<<'SWAP'\n([\s\S]*?)\nSWAP\n/.exec(fn)[1].split('\n');
+      body.filter((l) => !l.startsWith('#')).should.eql(['[Main]', 'Mechanism=none']);
       body.filter((l) => l.startsWith('#')).length.should.be.above(2); // says why
+      readonly().should.not.match(/Mechanism=zram$/m);
     });
 
-    it('readonly.sh runs it from enable and from units (re-runnable on a read-only Pi)', () => {
+    // run a readonly.sh function against a scratch copy of /etc/rpi and /proc/swaps
+    const runIn = (fn, call, files) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7-swap-'));
+      try {
+        Object.keys(files).forEach((f) => {
+          fs.mkdirSync(path.dirname(path.join(tmp, f)), { recursive: true });
+          fs.writeFileSync(path.join(tmp, f), files[f]);
+        });
+        const text = shFunction(fn).split('/etc/rpi/').join(`${tmp}/etc/rpi/`)
+          .split('/proc/swaps')
+          .join(`${tmp}/proc/swaps`);
+        const r = spawnSync('/bin/sh', ['-c', `${text}\n${call}`], { encoding: 'utf8' });
+        r.status.should.equal(0, r.stderr);
+        const dropin = path.join(tmp, DROPIN);
+        return { stdout: r.stdout, dropin: fs.existsSync(dropin) ? fs.readFileSync(dropin, 'utf8') : null };
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it('swap_off replaces an existing zram drop-in (a device set up before) with Mechanism=none', () => {
+      const r = runIn('swap_off', 'swap_off', {
+        '/etc/rpi/swap.conf': '[Main]\nMechanism=auto\n',
+        [DROPIN]: '# old\n[Main]\nMechanism=zram\n',
+      });
+      r.dropin.should.match(/^Mechanism=none$/m);
+      r.dropin.should.not.match(/^Mechanism=zram$/m);
+      r.stdout.should.match(/swap: off/);
+    });
+
+    it('swap_off leaves a system without rpi-swap alone', () => {
+      should(runIn('swap_off', 'swap_off', {}).dropin).be.null();
+    });
+
+    const PROC_SWAPS_HEAD = 'Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n';
+    it('status: off configured and nothing in use', () => {
+      runIn('swap_status', 'swap_status', {
+        '/etc/rpi/swap.conf': '', [DROPIN]: '[Main]\nMechanism=none\n', '/proc/swaps': PROC_SWAPS_HEAD,
+      }).stdout.should.equal('swap: off (Mechanism=none)\nswap in use: none\n');
+    });
+
+    it('status: the old zram drop-in, with zram still in use until the next boot', () => {
+      runIn('swap_status', 'swap_status', {
+        '/etc/rpi/swap.conf': '',
+        [DROPIN]: '[Main]\nMechanism=zram\n',
+        '/proc/swaps': `${PROC_SWAPS_HEAD}/dev/zram0                              partition\t218652\t\t0\t\t100\n`,
+      }).stdout.should.equal('swap: Mechanism=zram (old drop-in: run deploy/update-readonly.sh)\nswap in use: /dev/zram0\n');
+    });
+
+    it('status: rpi-swap default, or not installed', () => {
+      runIn('swap_status', 'swap_status', { '/etc/rpi/swap.conf': '', '/proc/swaps': PROC_SWAPS_HEAD })
+        .stdout.should.startWith('swap: rpi-swap default (no g7 drop-in)\n');
+      runIn('swap_status', 'swap_status', { '/proc/swaps': PROC_SWAPS_HEAD })
+        .stdout.should.startWith('swap: rpi-swap not installed\n');
+    });
+
+    it('readonly.sh runs it from enable and from units (re-runnable on a read-only Pi), status from status', () => {
       const s = readonly();
-      /^ {2}units\)\n[\s\S]*?swap_zram_only[\s\S]*?;;/m.test(s).should.equal(true);
-      /^ {2}enable\)\n[\s\S]*?swap_zram_only\n[\s\S]*?remove_swapfile_writable_card[\s\S]*?;;/m.test(s).should.equal(true);
+      /^ {2}units\)\n[\s\S]*?swap_off[\s\S]*?;;/m.test(s).should.equal(true);
+      /^ {2}enable\)\n[\s\S]*?swap_off\n[\s\S]*?remove_swapfile_writable_card[\s\S]*?;;/m.test(s).should.equal(true);
+      /^ {2}status\)\n[\s\S]*?swap_status[\s\S]*?;;/m.test(s).should.equal(true);
+    });
+
+    it('update-readonly.sh rewrites the drop-in (readonly.sh units) before staging it for the card', () => {
+      const s = read('update-readonly.sh');
+      const units = s.indexOf('sh "$HERE/readonly.sh" units');
+      units.should.be.above(-1);
+      s.indexOf('cp -a --parents').should.be.above(units);
     });
 
     it('update-readonly.sh carries the drop-in to the card', () => {

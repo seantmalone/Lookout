@@ -20,11 +20,12 @@
 # Software updates: `readonly.sh disable --reboot`, update, `enable --reboot`.
 #
 # Swap (enable and units): with rpi-swap installed, a drop-in sets
-# Mechanism=zram (compressed RAM only, no swap file). The default (auto =
+# Mechanism=none: no swap at all, neither zram nor a file. The default (auto =
 # zram+file) keeps trying to resize /var/swap, which on a read-only card
-# copies the file into the RAM overlay until that is full. enable removes the
-# old swap file from the still-writable card; on a card that is already
-# read-only, update-readonly.sh removes it from the card itself.
+# copies the file into the RAM overlay until that is full; zram as large as
+# RAM lets a Pi grind for hours instead of killing a runaway process. enable
+# removes the old swap file from the still-writable card; on a card that is
+# already read-only, update-readonly.sh removes it from the card itself.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -85,24 +86,42 @@ ConditionKernelCommandLine=!overlayroot=tmpfs
 UNIT
 }
 
-# rpi-swap: compressed RAM (zram) only, no swap file
-swap_zram_only() {
+# rpi-swap: no swap. Rewritten every time, so a device with the earlier
+# zram-only drop-in gets this one (update-readonly.sh runs `units`).
+swap_off() {
   [ -f /etc/rpi/swap.conf ] || { echo "swap: rpi-swap not installed; left unchanged"; return 0; }
   install -d -m 755 /etc/rpi/swap.conf.d
   cat > /etc/rpi/swap.conf.d/90-g7-readonly.conf.tmp <<'SWAP'
-# Read-only SD card (deploy/readonly.sh): swap in compressed RAM (zram) only.
-# With the default (Mechanism=auto, i.e. zram+file) rpi-resize-swap-file
-# tried to resize /var/swap about once a minute; on the read-only card each
-# try copied the file into the RAM overlay until it was full ("No space left
-# on device"), cost ~9 s of CPU and ~200 MB of RAM, and led to kernel
-# out-of-memory kills. With zram no swap file is used. Delete this file (on
-# the card too) to go back to the default.
+# Read-only SD card (deploy/readonly.sh): no swap at all.
+# - No swap file: with the default (Mechanism=auto, i.e. zram+file)
+#   rpi-resize-swap-file tried to resize /var/swap about once a minute; on the
+#   read-only card each try copied the file into the RAM overlay until it was
+#   full ("No space left on device") and led to out-of-memory kills.
+# - No zram either: about 255 MB is free in normal running, so swap buys
+#   little, and without it a runaway process is killed quickly instead of the
+#   device grinding. (A collector was once unresponsive for 31 hours, a few
+#   days after zram as large as RAM was enabled; the cause is unknown.)
+#   g7-alive.service reboots a device that stalls anyway.
+# Delete this file (on the card too) to go back to the default.
 [Main]
-Mechanism=zram
+Mechanism=none
 SWAP
   chmod 644 /etc/rpi/swap.conf.d/90-g7-readonly.conf.tmp
   mv -f /etc/rpi/swap.conf.d/90-g7-readonly.conf.tmp /etc/rpi/swap.conf.d/90-g7-readonly.conf
-  echo "swap: zram only (/etc/rpi/swap.conf.d/90-g7-readonly.conf), from the next boot"
+  echo "swap: off (/etc/rpi/swap.conf.d/90-g7-readonly.conf, Mechanism=none), from the next boot"
+}
+
+# What is configured, and what is in use now (until the next boot that may
+# still be the old zram)
+swap_status() {
+  if [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ]; then
+    mech=$(sed -n 's/^Mechanism=//p' /etc/rpi/swap.conf.d/90-g7-readonly.conf | tail -n 1)
+    if [ "$mech" = none ]; then echo "swap: off (Mechanism=none)"
+    else echo "swap: Mechanism=$mech (old drop-in: run deploy/update-readonly.sh)"; fi
+  elif [ -f /etc/rpi/swap.conf ]; then echo "swap: rpi-swap default (no g7 drop-in)"
+  else echo "swap: rpi-swap not installed"; fi
+  inuse=$(awk 'NR > 1 { printf "%s%s", sep, $1; sep = " " }' /proc/swaps 2>/dev/null || true)
+  echo "swap in use: ${inuse:-none}"
 }
 
 # The old swap file, while the card is still writable (before the overlay).
@@ -166,7 +185,7 @@ case "$ACTION" in
     # drop-in on the running system (update-readonly.sh copies them to the card)
     install_units
     skip_remount_fs_when_readonly
-    swap_zram_only
+    swap_off
     exit 0
     ;;
   install)
@@ -179,9 +198,7 @@ case "$ACTION" in
     if overlay_configured; then echo "next boot: read-only"; else echo "next boot: writable"; fi
     echo "boot partition: $(findmnt -no OPTIONS /boot/firmware | cut -d, -f1)"
     echo "g7-persist: path $(systemctl is-enabled g7-persist.path 2>/dev/null || echo missing), timer $(systemctl is-enabled g7-persist.timer 2>/dev/null || echo missing)"
-    if [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ]; then echo "swap: zram only"
-    elif [ -f /etc/rpi/swap.conf ]; then echo "swap: rpi-swap default (no zram-only drop-in)"
-    else echo "swap: rpi-swap not installed"; fi
+    swap_status
     if overlay_active; then
       if [ -e /media/root-ro/var/swap ]; then echo "card swap file: present"; else echo "card swap file: none"; fi
     elif [ -e /var/swap ]; then echo "card swap file: present"; else echo "card swap file: none"; fi
@@ -191,7 +208,7 @@ case "$ACTION" in
     [ "$mem" -gt 262144 ] || { echo "at least 512 MB RAM needed" >&2; exit 1; }
     install_units
     skip_remount_fs_when_readonly
-    swap_zram_only
+    swap_off
     remove_swapfile_writable_card
     if ! dpkg -s overlayroot >/dev/null 2>&1; then
       # the package regenerates the initramfs images on the boot partition
