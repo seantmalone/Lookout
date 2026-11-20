@@ -329,7 +329,16 @@ exit on SIGTERM), the swap drop-in rewrite and `readonly.sh status` output
 on scratch files, `sh -n` of every script. Not verified without a device:
 systemd's handling of the unit (notify, watchdog expiry, reboot-immediate,
 clean stop), the device found on a real Pi, and direct reads from the card.
-Verified on the devices: <to be filled in after deployment>
+Verified on the devices (2026-11-19, two Pi Zero W collectors, Raspberry Pi OS 13, systemd 257):
+`g7-alive` found the card as `/dev/mmcblk0` and its heartbeat reaches systemd (the unit's
+watchdog timestamp advances every round); a normal `systemctl stop` did not reboot; with the
+loop frozen (`kill -STOP`) the device rebooted itself about 4.6 minutes later and was back,
+with Lookout running and the card read-only, about 7 minutes after the freeze. After
+`update-readonly.sh` and a reboot both devices show `SwapTotal: 0 kB`, `g7-alive` active,
+no failed units, and `health` in `g7-rig status` with real figures (about 255 MB available,
+overlay 1-8 of 214 MB, `throttled` 0x0). Not verified: a real stall of the SD card or of
+userspace (only the frozen loop was tested), and whether this would have caught the
+2026-11-18 stall, whose cause is unknown.
 
 ## Watching it
 
