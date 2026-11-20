@@ -32,9 +32,15 @@ install -m 644 "$HERE/systemd/g7-central.service" /etc/systemd/system/g7-central
 # Bluetooth watchdog: restarts bluetooth when discovering hears nothing
 sed "s#@NODE_BIN@#$NODE_BIN#g" "$HERE/systemd/g7-bt-watchdog.service" > /etc/systemd/system/g7-bt-watchdog.service
 install -m 644 "$HERE/systemd/g7-bt-watchdog.timer" /etc/systemd/system/g7-bt-watchdog.timer
+# responsiveness watchdog: reboots when userspace or the SD card stalls
+install -o root -g root -m 755 "$HERE/g7-alive.sh" /usr/local/sbin/g7-alive
+install -m 644 "$HERE/systemd/g7-alive.service" /etc/systemd/system/g7-alive.service
 systemctl daemon-reload
 systemctl enable g7-central.service >/dev/null 2>&1 || true
 systemctl enable --now g7-bt-watchdog.timer >/dev/null
+systemctl enable g7-alive.service >/dev/null 2>&1
+# a restart is a clean stop (not a failure) and runs the new script
+systemctl restart g7-alive.service
 systemctl restart bluetooth
 if [ "${1:-}" = "--enable" ]; then systemctl enable --now lookout; fi
-echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer"
+echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer, g7-alive.service"

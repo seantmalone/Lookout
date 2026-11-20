@@ -125,6 +125,60 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('g7-alive (reboots when userspace or the card stalls)', () => {
+    const unit = () => fs.readFileSync(path.join(DEPLOY, 'systemd', 'g7-alive.service'), 'utf8');
+    const section = (text, name) => {
+      const m = new RegExp(`^\\[${name}\\]\\n([\\s\\S]*?)(?=^\\[|(?![\\s\\S]))`, 'm').exec(text);
+      return m ? m[1] : '';
+    };
+
+    it('install.sh installs the script and the unit, enables it and (re)starts it', () => {
+      const s = read('install.sh');
+      s.should.match(/install -o root -g root -m 755 "\$HERE\/g7-alive\.sh" \/usr\/local\/sbin\/g7-alive\n/);
+      s.should.match(/install -m 644 "\$HERE\/systemd\/g7-alive\.service" \/etc\/systemd\/system\/g7-alive\.service\n/);
+      s.should.match(/systemctl enable g7-alive\.service/);
+      s.should.match(/systemctl restart g7-alive\.service/);
+      s.indexOf('systemctl restart g7-alive.service').should.be.above(s.indexOf('systemctl daemon-reload'));
+    });
+
+    it('update-readonly.sh mirrors the script, the unit and its enable link to the card', () => {
+      mirroredPaths().should.containDeep([
+        '/usr/local/sbin/g7-alive',
+        '/etc/systemd/system/g7-alive.service',
+        '/etc/systemd/system/multi-user.target.wants/g7-alive.service',
+      ]);
+    });
+
+    it('the unit: notify watchdog of 5 min, reboot at once on failure, no restart', () => {
+      const svc = section(unit(), 'Service');
+      svc.should.match(/^Type=notify$/m);
+      svc.should.match(/^NotifyAccess=all$/m);
+      svc.should.match(/^ExecStart=\/usr\/local\/sbin\/g7-alive$/m);
+      svc.should.match(/^WatchdogSec=300$/m);
+      svc.should.match(/^Restart=no$/m);
+      svc.should.match(/^Nice=-5$/m);
+      // FailureAction is a [Unit] setting (ignored with a warning in [Service])
+      section(unit(), 'Unit').should.match(/^FailureAction=reboot-immediate$/m);
+      svc.should.not.match(/FailureAction/);
+      section(unit(), 'Install').should.match(/^WantedBy=multi-user\.target$/m);
+    });
+
+    it('the unit: no dependency on Lookout or Bluetooth; a missing script is skipped, not a failure', () => {
+      const settings = unit().split('\n').filter((l) => !l.startsWith('#'));
+      settings.filter((l) => /lookout|bluetooth/i.test(l)).should.eql([]);
+      settings.filter((l) => /^(After|Requires|Wants|BindsTo|PartOf)=/.test(l)).should.eql([]);
+      section(unit(), 'Unit').should.match(/^ConditionPathIsExecutable=\/usr\/local\/sbin\/g7-alive$/m);
+    });
+
+    it('the unit documents what happens on expiry and how to turn it off', () => {
+      const comments = unit().split('\n').filter((l) => l.startsWith('#')).join('\n');
+      comments.should.match(/systemctl disable --now g7-alive\.service/);
+      comments.should.match(/watchdog/i);
+      comments.should.match(/FailureAction/);
+      comments.should.match(/clean stop/i);
+    });
+  });
+
   describe('g7-bt-watchdog units', () => {
     it('install.sh installs the service and enables the timer', () => {
       const s = read('install.sh');

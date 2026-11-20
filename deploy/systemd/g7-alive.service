@@ -1,0 +1,51 @@
+# Reboot the collector when userspace or the SD card stops responding.
+# Installed and enabled by deploy/install.sh; copied to a read-only card by
+# deploy/update-readonly.sh. Seen once: a collector unresponsive for over 31
+# hours (SSH connected, nothing answered) while the kernel and PID 1 kept the
+# hardware watchdog (RuntimeWatchdogSec) fed; the cause is unknown.
+#
+# How it works:
+#  - /usr/local/sbin/g7-alive sends READY=1 at start, then every 30 s runs a
+#    program, reads one block straight from the card (direct I/O) and only if
+#    both worked sends WATCHDOG=1.
+#  - No WATCHDOG=1 for WatchdogSec (5 min): systemd logs "Watchdog timeout",
+#    kills the service with WatchdogSignal (SIGKILL: a shell has nothing worth
+#    a core dump), the result is "watchdog", the unit is failed, and
+#    FailureAction=reboot-immediate calls reboot(2) at once (systemd syncs
+#    first) without a clean shutdown. Safe here: the card is read-only, and the
+#    RAM overlay is lost at any reboot anyway.
+#  - If the kill cannot complete (a process stuck in the kernel on the card),
+#    systemd waits TimeoutStopSec (15 s) twice, then fails the unit anyway.
+#    If PID 1 itself is stuck, the hardware watchdog reboots instead.
+#  - A clean stop is not a failure: `systemctl stop`/`restart` and shutdown
+#    send SIGTERM, g7-alive exits 0, and the watchdog only counts while the
+#    service runs. Any other end of the main process (SIGKILL from outside,
+#    a crash, the start not finishing within TimeoutStartSec) is a failure and
+#    reboots too.
+#
+# To turn it off: sudo systemctl disable --now g7-alive.service
+# (on a read-only card that lasts until the next boot; to keep it off, also
+# delete /media/root-ro/etc/systemd/system/multi-user.target.wants/g7-alive.service
+# with the card unlocked: deploy/README.md).
+[Unit]
+Description=Reboot if userspace or the SD card stops responding (g7-alive)
+# not installed (or not yet on the card): skipped, which is not a failure
+ConditionPathIsExecutable=/usr/local/sbin/g7-alive
+FailureAction=reboot-immediate
+
+[Service]
+Type=notify
+# READY=1 / WATCHDOG=1 come from systemd-notify, a child of the main process
+NotifyAccess=all
+ExecStart=/usr/local/sbin/g7-alive
+WatchdogSec=300
+WatchdogSignal=SIGKILL
+Restart=no
+TimeoutStartSec=3min
+TimeoutStopSec=15s
+# not starved itself by ordinary load, and not picked by the OOM killer
+Nice=-5
+OOMScoreAdjust=-900
+
+[Install]
+WantedBy=multi-user.target
