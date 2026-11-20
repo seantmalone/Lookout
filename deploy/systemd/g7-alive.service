@@ -30,7 +30,7 @@
 [Unit]
 Description=Reboot if userspace or the SD card stops responding (g7-alive)
 # not installed (or not yet on the card): skipped, which is not a failure
-ConditionPathIsExecutable=/usr/local/sbin/g7-alive
+ConditionFileIsExecutable=/usr/local/sbin/g7-alive
 FailureAction=reboot-immediate
 
 [Service]

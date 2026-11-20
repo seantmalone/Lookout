@@ -236,7 +236,8 @@ describe('deploy scripts', () => {
       const settings = unit().split('\n').filter((l) => !l.startsWith('#'));
       settings.filter((l) => /lookout|bluetooth/i.test(l)).should.eql([]);
       settings.filter((l) => /^(After|Requires|Wants|BindsTo|PartOf)=/.test(l)).should.eql([]);
-      section(unit(), 'Unit').should.match(/^ConditionPathIsExecutable=\/usr\/local\/sbin\/g7-alive$/m);
+      section(unit(), 'Unit').should.match(/^ConditionFileIsExecutable=\/usr\/local\/sbin\/g7-alive$/m);
+      unit().should.not.match(/ConditionPathIsExecutable/);
     });
 
     it('the unit documents what happens on expiry and how to turn it off', () => {
