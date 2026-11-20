@@ -42,6 +42,15 @@ const readStore = async (dir, keys) => {
 };
 
 // A fake for every external command; records what was run.
+// What a read-only Pi Zero W collector shows (trimmed).
+const PROC = {
+  '/proc/loadavg': '0.93 0.71 0.55 1/123 4567\n',
+  '/proc/meminfo': 'MemTotal:         437312 kB\nMemFree:          120344 kB\nMemAvailable:     262292 kB\n'
+    + 'SwapTotal:             0 kB\nSwapFree:              0 kB\n',
+  '/proc/mounts': '/dev/mmcblk0p2 /media/root-ro ext4 ro,relatime 0 0\ntmpfs-root /media/root-rw tmpfs rw,relatime 0 0\n'
+    + 'overlayroot / overlay rw,relatime,lowerdir=/media/root-ro,upperdir=/media/root-rw/overlay 0 0\n',
+};
+
 const fakeExec = (overrides = {}) => {
   const calls = [];
   const exec = async (cmd, args = [], opts = {}) => {
@@ -53,6 +62,7 @@ const fakeExec = (overrides = {}) => {
     if (line === 'bluetoothctl show') return { code: 0, stdout: 'Controller 00:00:00:00:00:01 (public)\n\tPowered: yes\n', stderr: '' };
     if (line.startsWith('findmnt -no OPTIONS')) return { code: 0, stdout: 'ro,relatime\n', stderr: '' };
     if (line.startsWith('journalctl')) return { code: 0, stdout: 'got glucose\nError: sample failure\nuploaded SGV\n', stderr: '' };
+    if (line === 'vcgencmd get_throttled') return { code: 0, stdout: 'throttled=0x0\n', stderr: '' };
     return { code: 0, stdout: '', stderr: '' };
   };
   return { exec, calls };
@@ -63,6 +73,8 @@ describe('g7-rig CLI', () => {
   let io;
   let out;
   let err;
+  let procFiles;
+  let statfsCalls;
 
   const makeIo = (name, exec, stdin = '') => {
     out = '';
@@ -82,10 +94,21 @@ describe('g7-rig CLI', () => {
       hostname: () => `rig-${name}`,
       uptime: () => 1234.5,
       getuid: () => 1000,
+      readFile: (f) => {
+        if (!(f in procFiles)) throw new Error(`ENOENT: ${f}`);
+        return procFiles[f];
+      },
+      statfs: (f) => {
+        statfsCalls.push(f);
+        if (f !== '/media/root-rw') throw new Error(`ENOENT: ${f}`);
+        return { bsize: 4096, blocks: 54784, bfree: 54374 };
+      },
     };
   };
 
   beforeEach(async () => {
+    procFiles = { ...PROC };
+    statfsCalls = [];
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7rig-cli-'));
     ['a', 'b'].forEach((n) => fs.mkdirSync(path.join(tmp, n, 'storage'), { recursive: true }));
     fs.writeFileSync(path.join(tmp, 'a', 'lookout.env'), envFile('AA:BB:CC:DD:EE:FF'), { mode: 0o600 });
@@ -137,7 +160,78 @@ describe('g7-rig CLI', () => {
       last_heard: { time: '2026-11-10T11:59:30.000Z', rssi: -71 },
       pairing: { state: 'paired', since: null, error: null },
       errors: ['Error: sample failure'],
+      health: {
+        load1: 0.93,
+        mem_total_kb: 437312,
+        mem_available_kb: 262292,
+        swap_total_kb: 0,
+        swap_used_kb: 0,
+        overlay_used_kb: 1640,
+        overlay_total_kb: 219136,
+        throttled: '0x0',
+      },
     });
+  });
+
+  const NO_HEALTH = {
+    load1: null,
+    mem_total_kb: null,
+    mem_available_kb: null,
+    swap_total_kb: null,
+    swap_used_kb: null,
+    overlay_used_kb: null,
+    overlay_total_kb: null,
+    throttled: null,
+  };
+
+  it('status health: vcgencmd (time-limited) is the only extra command', async () => {
+    const a = fakeExec();
+    io = makeIo('a', a.exec);
+    (await run(['status'], io)).should.equal(0, err);
+    const v = a.calls.filter((c) => c.line.startsWith('vcgencmd'));
+    v.map((c) => c.line).should.eql(['vcgencmd get_throttled']);
+    v[0].opts.timeoutMs.should.be.belowOrEqual(10000);
+    a.calls.map((c) => c.line.split(' ')[0]).should.not.containEql('df');
+    statfsCalls.should.eql(['/media/root-rw']);
+  });
+
+  it('status health: overlay null when /media/root-rw is not mounted (card writable)', async () => {
+    procFiles['/proc/mounts'] = '/dev/mmcblk0p2 / ext4 rw,noatime 0 0\n';
+    io = makeIo('a', fakeExec().exec);
+    (await run(['status'], io)).should.equal(0, err);
+    const h = JSON.parse(out).health;
+    should(h.overlay_used_kb).be.null();
+    should(h.overlay_total_kb).be.null();
+    h.mem_total_kb.should.equal(437312);
+    statfsCalls.should.eql([]);
+  });
+
+  it('status health: throttled null when vcgencmd is missing or fails', async () => {
+    io = makeIo('a', fakeExec({ 'vcgencmd get_throttled': { code: 127, stdout: '', stderr: 'not found' } }).exec);
+    (await run(['status'], io)).should.equal(0, err);
+    should(JSON.parse(out).health.throttled).be.null();
+    io = makeIo('a', fakeExec({ 'vcgencmd get_throttled': { code: 255, stdout: 'throttled=0x0\n', stderr: 'VCHI failed' } }).exec);
+    (await run(['status'], io)).should.equal(0, err);
+    should(JSON.parse(out).health.throttled).be.null();
+  });
+
+  it('status health: nothing readable -> every field null, status still ok', async () => {
+    procFiles = {};
+    io = makeIo('a', fakeExec({ 'vcgencmd get_throttled': { code: 127, stdout: '', stderr: '' } }).exec);
+    io.statfs = () => { throw new Error('EIO'); };
+    (await run(['status'], io)).should.equal(0, err);
+    const s = JSON.parse(out);
+    s.health.should.eql(NO_HEALTH);
+    s.uptime_s.should.equal(1234);
+    s.sensor.code.should.equal('1234');
+  });
+
+  it('status health: a throwing reader does not fail status', async () => {
+    io = makeIo('a', fakeExec().exec);
+    io.readFile = () => { throw new Error('EIO'); };
+    io.statfs = () => { throw new Error('EIO'); };
+    (await run(['status'], io)).should.equal(0, err);
+    JSON.parse(out).health.should.eql({ ...NO_HEALTH, throttled: '0x0' });
   });
 
   it('status degrades when systemd, BlueZ and the journal are unavailable', async () => {
@@ -674,6 +768,9 @@ describe('g7-rig CLI', () => {
     const s = JSON.parse(r.stdout);
     s.sensor.key_fingerprint.should.equal(fingerprint(KEY));
     s.lookout_active.should.equal(false);
+    // the real readers: every health field present (null where this machine has no /proc etc.)
+    Object.keys(s.health).should.eql(['load1', 'mem_total_kb', 'mem_available_kb', 'swap_total_kb',
+      'swap_used_kb', 'overlay_used_kb', 'overlay_total_kb', 'throttled']);
   });
 
   it('runs as a script: rejects a bad command with exit 2', () => {

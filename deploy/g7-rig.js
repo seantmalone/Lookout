@@ -32,6 +32,7 @@ const central = require('../lib/g7rig/central');
 const keyfile = require('../lib/g7rig/keyfile');
 const { parseScan } = require('../lib/g7rig/scan');
 const btwatch = require('../lib/g7rig/btwatch');
+const health = require('../lib/g7rig/health');
 
 const ENV_FILE = '/etc/lookout.env';
 // fleet collectors: never pair on their own, and never reboot on missed reads
@@ -86,6 +87,8 @@ const realIo = () => ({
   hostname: () => os.hostname(),
   uptime: () => os.uptime(),
   getuid: () => (process.getuid ? process.getuid() : -1),
+  readFile: (f) => fs.readFileSync(f, 'utf8'),
+  statfs: (f) => fs.statfsSync(f),
 });
 
 const lastLine = (text) => String(text || '').trim().split('\n').pop() || '';
@@ -428,6 +431,27 @@ const btWatchdog = async (io) => {
   }
 };
 
+// status.health (lib/g7rig/health.js): /proc, a statfs of the RAM overlay and
+// `vcgencmd get_throttled`. Never fails: anything unreadable is null.
+const tryOr = (fn, fallback) => {
+  try {
+    return fn();
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const readHealth = async (io, throttledRun) => {
+  const text = (f) => tryOr(() => io.readFile(f), null);
+  const mounted = health.isMounted(text('/proc/mounts'), health.OVERLAY_MOUNT);
+  return tryOr(() => health.build({
+    loadavgText: text('/proc/loadavg'),
+    meminfoText: text('/proc/meminfo'),
+    overlayStatfs: mounted ? tryOr(() => io.statfs(health.OVERLAY_MOUNT), null) : null,
+    throttledText: throttledRun && throttledRun.code === 0 ? throttledRun.stdout : null,
+  }), health.build({}));
+};
+
 const LOCAL_COMMANDS = ['persist', 'bt-watchdog'];
 
 const commands = {
@@ -442,10 +466,11 @@ const commands = {
   status: async (io) => {
     const dir = await lookoutDir(io);
     const storage = await readItems((await openStorage(io, dir)).store);
-    const [active, bt, errors] = await Promise.all([
+    const [active, bt, errors, throttled] = await Promise.all([
       io.exec('systemctl', ['is-active', 'lookout']),
       io.exec('bluetoothctl', ['show']),
       recentErrorsCached(io),
+      io.exec('vcgencmd', ['get_throttled'], { timeoutMs: 5000 }),
     ]);
     const built = status.build({
       storage,
@@ -460,6 +485,7 @@ const commands = {
     });
     // the address this collector presents to the sensor
     built.sensor.central = bt.code === 0 ? central.adapterAddress(bt.stdout) : null;
+    built.health = await readHealth(io, throttled);
     printJson(io, built);
   },
 
