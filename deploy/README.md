@@ -710,7 +710,11 @@ To try someone else's build (for example upstream Lookout or xdrip-js
 without this fork's fleet changes) on a read-only collector without
 touching the card. Everything below lives in RAM (`/run` and the RAM
 overlay), so a reboot or a power cut at any point brings the fleet setup
-back. Not yet done on a device as written; check each step's output.
+back. A version of this was done on a device on 2026-11-15 (an upstream test
+build ran from a second checkout with a copy of the storage, paired a sensor,
+and its key was then moved into the fleet storage and copied to the other
+collector). The exact commands below differ in details from what was typed
+that day and have not been run as written; check each step's output.
 
 **Before you start.** The build must not be able to use the medical slot
 (slot 1, the pump's): check how it chooses the G7 display slot and its
