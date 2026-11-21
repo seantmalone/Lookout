@@ -1,0 +1,24 @@
+# Reboot the collector when its network has fallen over (g7-netwatch).
+# Seen twice on a Pi Zero W: it dropped off Wi-Fi while powered and only came
+# back after a power cycle. Installed by deploy/install.sh; run once a minute
+# by g7-netwatch.timer.
+#
+# Each run pings the default gateway (2 pings, 3 s wait). After the network
+# has worked since boot, 10 minutes down in a row reboot (systemctl reboot);
+# if it has not worked since boot, 60 minutes. Logs: journalctl -t g7-netwatch
+#
+# To turn it off: sudo systemctl disable --now g7-netwatch.timer
+# (on a read-only card that lasts until the next boot; to keep it off, also
+# delete /media/root-ro/etc/systemd/system/timers.target.wants/g7-netwatch.timer
+# with the card unlocked: deploy/README.md).
+[Unit]
+Description=Reboot if the network has been down too long (g7-netwatch)
+# not installed (or not yet on the card): skipped, which is not a failure
+ConditionFileIsExecutable=/usr/local/sbin/g7-netwatch
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/g7-netwatch
+Nice=10
+# a run takes about 4 s when the gateway does not answer
+TimeoutStartSec=50s

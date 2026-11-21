@@ -11,7 +11,8 @@
 # over the earlier zram-only one), it also deletes the old swap file from the
 # card itself (/media/root-ro/var/swap), never through the overlay. The swap
 # change takes effect at the next reboot. Files the repo no longer has
-# (/usr/local/sbin/g7-new-sensor) are removed from the card the same way.
+# (/usr/local/sbin/g7-new-sensor) and the hand-installed lab-netwatch that
+# g7-netwatch replaced are removed from the card the same way.
 # Lookout keeps running its old code until `systemctl restart lookout` or a
 # reboot.
 set -eu
@@ -69,6 +70,8 @@ PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
   /etc/systemd/system/g7-persist.timer /etc/systemd/system/systemd-remount-fs.service.d
   /etc/systemd/system/g7-bt-watchdog.service /etc/systemd/system/g7-bt-watchdog.timer
   /usr/local/sbin/g7-alive /etc/systemd/system/g7-alive.service
+  /usr/local/sbin/g7-netwatch /etc/systemd/system/g7-netwatch.service
+  /etc/systemd/system/g7-netwatch.timer
   /etc/rpi/swap.conf.d/90-g7-readonly.conf
   /etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf
   /etc/systemd/system/multi-user.target.wants/lookout.service
@@ -76,6 +79,7 @@ PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
   /etc/systemd/system/multi-user.target.wants/g7-persist.path
   /etc/systemd/system/timers.target.wants/g7-persist.timer
   /etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer
+  /etc/systemd/system/timers.target.wants/g7-netwatch.timer
   /etc/systemd/system/multi-user.target.wants/g7-alive.service"
 for p in $PATHS; do
   if [ -e "$p" ] || [ -L "$p" ]; then cp -a --parents "$p" "$STAGE/root/"; fi
@@ -95,6 +99,18 @@ if [ -e /media/root-ro/usr/local/sbin/g7-new-sensor ] || [ -L /media/root-ro/usr
   RM_OLD=yes
 fi
 
+# lab-netwatch, the hand-installed version of g7-netwatch: install.sh disabled
+# and removed it on the running system; take it off the card too. Decided
+# before unlocking; literal paths.
+LAB_NETWATCH="/media/root-ro/usr/local/sbin/lab-netwatch
+  /media/root-ro/etc/systemd/system/lab-netwatch.service
+  /media/root-ro/etc/systemd/system/lab-netwatch.timer
+  /media/root-ro/etc/systemd/system/timers.target.wants/lab-netwatch.timer"
+RM_LAB=no
+for p in $LAB_NETWATCH; do
+  if [ -e "$p" ] || [ -L "$p" ]; then RM_LAB=yes; fi
+done
+
 mount -o remount,rw "$L"
 trap 'relock; rm -rf "$STAGE"' EXIT
 rsync -rlt "$STAGE/src/" "$L$SRC/"
@@ -112,6 +128,13 @@ if [ "$RM_SWAP" = yes ]; then
 fi
 if [ "$RM_OLD" = yes ]; then
   rm -f /media/root-ro/usr/local/sbin/g7-new-sensor
+  drop_caches                          # a cached deleted file blocks the relock
+fi
+if [ "$RM_LAB" = yes ]; then
+  rm -f /media/root-ro/usr/local/sbin/lab-netwatch
+  rm -f /media/root-ro/etc/systemd/system/lab-netwatch.service
+  rm -f /media/root-ro/etc/systemd/system/lab-netwatch.timer
+  rm -f /media/root-ro/etc/systemd/system/timers.target.wants/lab-netwatch.timer
   drop_caches                          # a cached deleted file blocks the relock
 fi
 trap - EXIT
@@ -140,6 +163,13 @@ if [ "$RM_OLD" = yes ]; then
   else
     echo "removed the old g7-new-sensor from the card"
   fi
+fi
+if [ "$RM_LAB" = yes ]; then
+  left=no
+  for p in $LAB_NETWATCH; do
+    if [ -e "$p" ] || [ -L "$p" ]; then echo "card still has $p" >&2; left=yes; bad=1; fi
+  done
+  [ $left = yes ] || echo "removed the old lab-netwatch from the card"
 fi
 rm -rf "$STAGE"
 [ $bad = 0 ] || exit 1

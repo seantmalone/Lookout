@@ -376,6 +376,85 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('g7-netwatch (reboots when the network has fallen over)', () => {
+    const unitFile = (f) => fs.readFileSync(path.join(DEPLOY, 'systemd', f), 'utf8');
+
+    it('install.sh installs the script and both units, and enables the timer after daemon-reload', () => {
+      const s = read('install.sh');
+      s.should.match(/install -o root -g root -m 755 "\$HERE\/g7-netwatch\.sh" \/usr\/local\/sbin\/g7-netwatch\n/);
+      s.should.match(/install -m 644 "\$HERE\/systemd\/g7-netwatch\.service" \/etc\/systemd\/system\/g7-netwatch\.service\n/);
+      s.should.match(/install -m 644 "\$HERE\/systemd\/g7-netwatch\.timer" \/etc\/systemd\/system\/g7-netwatch\.timer\n/);
+      s.indexOf('systemctl enable --now g7-netwatch.timer').should.be.above(s.indexOf('systemctl daemon-reload'));
+    });
+
+    it('update-readonly.sh mirrors the script, both units and the timer\'s enable link to the card', () => {
+      mirroredPaths().should.containDeep([
+        '/usr/local/sbin/g7-netwatch',
+        '/etc/systemd/system/g7-netwatch.service',
+        '/etc/systemd/system/g7-netwatch.timer',
+        '/etc/systemd/system/timers.target.wants/g7-netwatch.timer',
+      ]);
+    });
+
+    it('the service: oneshot at nice 10, runs the script with no arguments', () => {
+      const svc = unitFile('g7-netwatch.service');
+      svc.should.match(/^Type=oneshot$/m);
+      svc.should.match(/^Nice=10$/m);
+      svc.should.match(/^ExecStart=\/usr\/local\/sbin\/g7-netwatch$/m);
+      svc.should.match(/^ConditionFileIsExecutable=\/usr\/local\/sbin\/g7-netwatch$/m);
+      svc.should.not.match(/^\[Install\]/m); // started by the timer only
+    });
+
+    it('the timer: 3 min after boot, then every minute, 10 s accuracy', () => {
+      const timer = unitFile('g7-netwatch.timer');
+      timer.should.match(/^OnBootSec=3min$/m);
+      timer.should.match(/^OnUnitActiveSec=1min$/m);
+      timer.should.match(/^AccuracySec=10s$/m);
+      timer.should.match(/^WantedBy=timers\.target$/m);
+    });
+  });
+
+  describe('lab-netwatch (hand-installed before g7-netwatch) is removed from devices', () => {
+    const OLD = [
+      '/usr/local/sbin/lab-netwatch',
+      '/etc/systemd/system/lab-netwatch.service',
+      '/etc/systemd/system/lab-netwatch.timer',
+      '/etc/systemd/system/timers.target.wants/lab-netwatch.timer',
+    ];
+    const rmLines = (f) => read(f).split('\n').filter((l) => /\brm\b/.test(l) && l.includes('lab-netwatch'))
+      .map((l) => l.trim());
+
+    it('install.sh stops and disables the old timer (tolerating its absence), then removes the files', () => {
+      const s = read('install.sh');
+      const disable = s.indexOf('systemctl disable --now lab-netwatch.timer >/dev/null 2>&1 || true');
+      disable.should.be.above(-1);
+      rmLines('install.sh').should.eql([`rm -f ${OLD.join(' ')}`]);
+      s.indexOf(rmLines('install.sh')[0]).should.be.above(disable);
+      s.indexOf('systemctl daemon-reload').should.be.above(s.indexOf(rmLines('install.sh')[0]));
+    });
+
+    it('update-readonly.sh removes them from the card by literal paths, inside the unlocked window, and verifies', () => {
+      const s = read('update-readonly.sh');
+      rmLines('update-readonly.sh').should.eql(OLD.map((p) => `rm -f /media/root-ro${p}`));
+      const list = /^LAB_NETWATCH="([^"]*)"/m.exec(s);
+      list[1].split(/\s+/).filter(Boolean).should.eql(OLD.map((p) => `/media/root-ro${p}`));
+      const decide = s.indexOf('for p in $LAB_NETWATCH; do');
+      const unlock = s.indexOf('mount -o remount,rw "$L"');
+      const rm = s.indexOf(`rm -f /media/root-ro${OLD[0]}`);
+      const relock = s.indexOf('\nrelock\n');
+      decide.should.be.above(-1);
+      unlock.should.be.above(decide); // decided before unlocking
+      rm.should.be.above(unlock);
+      relock.should.be.above(rm);
+      s.should.match(/rm -f \/media\/root-ro\/etc\/systemd\/system\/timers\.target\.wants\/lab-netwatch\.timer\n\s*drop_caches/);
+      s.indexOf('for p in $LAB_NETWATCH; do', relock).should.be.above(relock); // checked after relocking
+    });
+
+    it('is not mirrored onto the card', () => {
+      mirroredPaths().filter((p) => p.includes('lab-netwatch')).should.eql([]);
+    });
+  });
+
   describe('g7-new-sensor (dropped from the repo) is removed from devices', () => {
     const OLD = '/usr/local/sbin/g7-new-sensor';
     const rmLines = (f) => read(f).split('\n').filter((l) => /\brm\b/.test(l) && l.includes('g7-new-sensor'))

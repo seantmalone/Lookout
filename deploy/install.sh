@@ -40,12 +40,21 @@ install -m 644 "$HERE/systemd/g7-bt-watchdog.timer" /etc/systemd/system/g7-bt-wa
 # responsiveness watchdog: reboots when userspace or the SD card stalls
 install -o root -g root -m 755 "$HERE/g7-alive.sh" /usr/local/sbin/g7-alive
 install -m 644 "$HERE/systemd/g7-alive.service" /etc/systemd/system/g7-alive.service
+# network watchdog: reboots when the network has been down too long
+install -o root -g root -m 755 "$HERE/g7-netwatch.sh" /usr/local/sbin/g7-netwatch
+install -m 644 "$HERE/systemd/g7-netwatch.service" /etc/systemd/system/g7-netwatch.service
+install -m 644 "$HERE/systemd/g7-netwatch.timer" /etc/systemd/system/g7-netwatch.timer
+# lab-netwatch: an earlier version of g7-netwatch, installed by hand on some
+# collectors; on a read-only card update-readonly.sh also deletes it from the card
+systemctl disable --now lab-netwatch.timer >/dev/null 2>&1 || true
+rm -f /usr/local/sbin/lab-netwatch /etc/systemd/system/lab-netwatch.service /etc/systemd/system/lab-netwatch.timer /etc/systemd/system/timers.target.wants/lab-netwatch.timer
 systemctl daemon-reload
 systemctl enable g7-central.service >/dev/null 2>&1 || true
 systemctl enable --now g7-bt-watchdog.timer >/dev/null
 systemctl enable g7-alive.service >/dev/null 2>&1
+systemctl enable --now g7-netwatch.timer >/dev/null
 # a restart is a clean stop (not a failure) and runs the new script
 systemctl restart g7-alive.service
 systemctl restart bluetooth
 if [ "${1:-}" = "--enable" ]; then systemctl enable --now lookout; fi
-echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer, g7-alive.service"
+echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer, g7-alive.service, g7-netwatch.timer"
