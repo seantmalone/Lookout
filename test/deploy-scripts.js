@@ -249,6 +249,35 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('g7-new-sensor (dropped from the repo) is removed from devices', () => {
+    const OLD = '/usr/local/sbin/g7-new-sensor';
+    const rmLines = (f) => read(f).split('\n').filter((l) => /\brm\b/.test(l) && l.includes('g7-new-sensor'))
+      .map((l) => l.trim());
+
+    it('install.sh removes it from the running system, by its literal path', () => {
+      rmLines('install.sh').should.eql([`rm -f ${OLD}`]);
+    });
+
+    it('update-readonly.sh removes it from the card by its literal path, inside the unlocked window, and verifies', () => {
+      const s = read('update-readonly.sh');
+      rmLines('update-readonly.sh').should.eql([`rm -f /media/root-ro${OLD}`]);
+      const decide = s.indexOf(`[ -e /media/root-ro${OLD} ]`);
+      const unlock = s.indexOf('mount -o remount,rw "$L"');
+      const rm = s.indexOf(`rm -f /media/root-ro${OLD}`);
+      const relock = s.indexOf('\nrelock\n');
+      decide.should.be.above(-1);
+      unlock.should.be.above(decide); // decided before unlocking
+      rm.should.be.above(unlock);
+      relock.should.be.above(rm);
+      s.should.match(/rm -f \/media\/root-ro\/usr\/local\/sbin\/g7-new-sensor\n\s*drop_caches/);
+      s.indexOf(`[ -e /media/root-ro${OLD} ]`, relock).should.be.above(relock); // checked after relocking
+    });
+
+    it('is not mirrored onto the card any more', () => {
+      mirroredPaths().should.not.containEql(OLD);
+    });
+  });
+
   describe('g7-bt-watchdog units', () => {
     it('install.sh installs the service and enables the timer', () => {
       const s = read('install.sh');

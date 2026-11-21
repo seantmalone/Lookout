@@ -8,7 +8,10 @@
 # With rpi-swap set to no swap (readonly.sh units rewrites the drop-in, also
 # over the earlier zram-only one), it also deletes the old swap file from the
 # card itself (/media/root-ro/var/swap), never through the overlay. The swap
-# change takes effect at the next reboot.
+# change takes effect at the next reboot. Files the repo no longer has
+# (/usr/local/sbin/g7-new-sensor) are removed from the card the same way.
+# Lookout keeps running its old code until `systemctl restart lookout` or a
+# reboot.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -81,6 +84,13 @@ if [ -f /etc/rpi/swap.conf.d/90-g7-readonly.conf ] && [ -f /media/root-ro/var/sw
   RM_SWAP=yes
 fi
 
+# g7-new-sensor, dropped from the repo: install.sh removed it from the running
+# system; take it off the card too. Decided before unlocking; literal path.
+RM_OLD=no
+if [ -e /media/root-ro/usr/local/sbin/g7-new-sensor ] || [ -L /media/root-ro/usr/local/sbin/g7-new-sensor ]; then
+  RM_OLD=yes
+fi
+
 mount -o remount,rw "$L"
 trap 'relock; rm -rf "$STAGE"' EXIT
 rsync -rlt "$STAGE/src/" "$L$SRC/"
@@ -95,6 +105,10 @@ done
 if [ "$RM_SWAP" = yes ]; then
   rm -f /media/root-ro/var/swap
   drop_caches                          # else the cached swap file blocks the relock
+fi
+if [ "$RM_OLD" = yes ]; then
+  rm -f /media/root-ro/usr/local/sbin/g7-new-sensor
+  drop_caches                          # a cached deleted file blocks the relock
 fi
 trap - EXIT
 relock
@@ -114,6 +128,13 @@ if [ "$RM_SWAP" = yes ]; then
     echo "card still has its swap file: /media/root-ro/var/swap" >&2; bad=1
   else
     echo "removed the old swap file from the card (/var/swap); no swap from the next reboot"
+  fi
+fi
+if [ "$RM_OLD" = yes ]; then
+  if [ -e /media/root-ro/usr/local/sbin/g7-new-sensor ] || [ -L /media/root-ro/usr/local/sbin/g7-new-sensor ]; then
+    echo "card still has /usr/local/sbin/g7-new-sensor" >&2; bad=1
+  else
+    echo "removed the old g7-new-sensor from the card"
   fi
 fi
 rm -rf "$STAGE"
