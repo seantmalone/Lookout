@@ -19,9 +19,12 @@ case "$CMD" in
 esac
 # $CMD is unquoted on purpose: it is one of the forms above, split into words.
 # shellcheck disable=SC2086
-# Lowest CPU (and, where available, idle I/O) priority: status is polled every
-# minute and must never take time from Lookout (Nice -15) or the UI (Nice 10).
+# Nice 10 and, where available, best-effort lowest I/O priority: low enough not
+# to disturb Lookout (Nice -15), high enough to finish while bluetoothd and
+# dbus-daemon (nice 0) are busy. At nice 19 + idle I/O, status missed the UI's
+# 20 s timeout during every failing Lookout read, so a healthy collector showed
+# as unreachable about 6 minutes in every 10.
 if command -v ionice >/dev/null 2>&1; then
-  exec nice -n 19 ionice -c 3 "$NODE" /usr/local/sbin/g7-rig.js $CMD
+  exec nice -n 10 ionice -c 2 -n 7 "$NODE" /usr/local/sbin/g7-rig.js $CMD
 fi
-exec nice -n 19 "$NODE" /usr/local/sbin/g7-rig.js $CMD
+exec nice -n 10 "$NODE" /usr/local/sbin/g7-rig.js $CMD

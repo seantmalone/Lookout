@@ -57,14 +57,24 @@ SHELLS.forEach((shell) => describe(`g7-rig-remote.sh (forced-command wrapper) un
     });
   });
 
-  it('runs g7-rig at the lowest CPU priority (never competes with Lookout or the UI)', () => {
+  it('runs g7-rig at nice 10 (below Lookout at -15, but not starved by nice-0 Bluetooth daemons)', () => {
     fs.writeFileSync(path.join(tmp, 'nicecheck'), '#!/bin/sh\nprintf "NICE:%s\\n" "$(ps -o nice= -p $$ | tr -d \' \')"\n', { mode: 0o755 });
     const env = {
       PATH: `${tmp}:/usr/bin:/bin`, G7RIG_NODE: path.join(tmp, 'nicecheck'), SSH_ORIGINAL_COMMAND: 'status',
     };
     const r = spawnSync(shell, [SCRIPT], { env, encoding: 'utf8' });
     r.status.should.equal(0, r.stderr);
-    Number(/^NICE:(-?\d+)$/m.exec(r.stdout)[1]).should.be.aboveOrEqual(19);
+    Number(/^NICE:(-?\d+)$/m.exec(r.stdout)[1]).should.equal(Math.min(19, os.getPriority() + 10)); // nice is relative to ours
+  });
+
+  it('uses nice -n 10 and best-effort lowest I/O (ionice -c 2 -n 7) on every exec, never idle class or nice 19', () => {
+    const src = fs.readFileSync(SCRIPT, 'utf8');
+    const execs = src.split('\n').filter((l) => /^\s*exec /.test(l));
+    execs.length.should.equal(2);
+    execs.forEach((l) => l.should.match(/^\s*exec nice -n 10 /));
+    execs.filter((l) => l.includes('ionice -c 2 -n 7 ')).length.should.equal(1);
+    src.should.not.match(/-n 19/);
+    src.should.not.match(/-c 3/);
   });
 
   it('passes stdin through to import-key', () => {
