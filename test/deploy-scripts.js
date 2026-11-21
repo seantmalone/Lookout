@@ -299,6 +299,27 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('lookout.env.example', () => {
+    // eslint-disable-next-line global-require
+    const env = require('../lib/g7rig/env');
+    const args = () => env.readArgs(read('lookout.env.example'));
+
+    it('has the fleet collector shape: watch slot, no xDripAPS, no auto-pair, no reboot, no pin', () => {
+      const a = args();
+      a.medical.should.equal(false);
+      should(a.sensorAddress).be.null();
+      const tokens = a.args.split(/\s+/);
+      tokens.should.containDeep(['--openaps', '--display_type', 'watch', '--no_xdripaps', '--no_auto_pair', '--no_reboot']);
+      tokens[tokens.indexOf('--display_type') + 1].should.equal('watch');
+    });
+
+    it('is what g7-rig pair would leave unchanged (fleet flags and slot already there)', () => {
+      const text = read('lookout.env.example');
+      ['--no_auto_pair', '--no_reboot'].reduce((t, f) => env.ensureFlag(t, f), env.ensureDisplayType(text))
+        .should.equal(text);
+    });
+  });
+
   describe('g7-bt-watchdog units', () => {
     it('install.sh installs the service and enables the timer', () => {
       const s = read('install.sh');
