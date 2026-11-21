@@ -145,13 +145,18 @@ Authentication subscription made before ExtraData.
 | `/usr/local/sbin/g7-central-apply`, `g7-central.service` (enabled) | `deploy/` | `install.sh` |
 | `g7-bt-watchdog.service`, `g7-bt-watchdog.timer` (enabled) | `deploy/systemd/` | `install.sh` |
 | `/usr/local/sbin/g7-alive`, `g7-alive.service` (enabled) | `deploy/` | `install.sh` |
+| `/usr/local/sbin/g7-netwatch`, `g7-netwatch.service`, `g7-netwatch.timer` (enabled) | `deploy/` | `install.sh` |
 | user `g7rig` (linger), its `authorized_keys`, `/etc/sudoers.d/g7rig` | | `setup-g7rig-access.sh` |
 | `/etc/systemd/journald.conf.d/zz-unplug-safe.conf`; apt-daily, apt-daily-upgrade, man-db timers and unattended-upgrades off; `/boot/firmware` read-only in `/etc/fstab`; `dtoverlay=vc4-kms-v3d,cma-64`; `/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf` (Wi-Fi power save off) | generated | `harden.sh` (`update-readonly.sh` copies the Wi-Fi drop-in to a read-only card) |
 | `g7-persist.service`, `g7-persist.timer`, `g7-persist.path` (enabled); `systemd-remount-fs.service.d/overlayroot.conf`; `/etc/rpi/swap.conf.d/90-g7-readonly.conf`; packages `overlayroot`, `rsync`; `overlayroot=tmpfs` in `/boot/firmware/cmdline.txt` | `deploy/systemd/`, generated | `readonly.sh enable` (`units` for the first three) |
 | `/etc/g7-central` | the key record | `g7-rig import-key` |
 
 `install.sh` also deletes `/usr/local/sbin/g7-new-sensor`, an older script
-that `g7-rig pair` replaced (`update-readonly.sh` deletes it from the card).
+that `g7-rig pair` replaced, and `lab-netwatch` (`/usr/local/sbin/lab-netwatch`,
+`lab-netwatch.service`, `lab-netwatch.timer` and its enable link), an
+earlier version of g7-netwatch installed by hand on one collector; it stops
+and disables that timer first. `update-readonly.sh` deletes both from the
+card.
 
 ## 2. Setting up a collector
 
@@ -233,10 +238,12 @@ read-only (step 10) changes to the system last only until the next boot.
    `update-readonly.sh` copies such a linked xdrip-js checkout onto the card
    along with Lookout (not its `node_modules`). How the devices' checkouts
    and dependencies were first installed is not recorded.
-6. **`sudo deploy/install.sh`**: the units, the Bluetooth fix, g7-rig, both
-   watchdogs ([table above](#what-is-installed-where)). It restarts
-   `bluetooth` and `g7-alive`; it never restarts Lookout. Re-run it after
-   every update (on a read-only card `update-readonly.sh` does).
+6. **`sudo deploy/install.sh`**: the units, the Bluetooth fix, g7-rig, the
+   three watchdogs (Bluetooth, alive, network;
+   [table above](#what-is-installed-where)). It restarts `bluetooth` and
+   `g7-alive` and enables the network watchdog's timer, so there is nothing
+   else to do for them; it never restarts Lookout. Re-run it after every
+   update (on a read-only card `update-readonly.sh` does).
 7. **The env file**: `sudoedit /etc/lookout.env`. Set `NIGHTSCOUT_HOST` and
    `API_SECRET`, and `LOOKOUT_ARGS` in this shape (the example has it; the
    devices run exactly these options):
@@ -307,8 +314,8 @@ sudo systemctl restart lookout        # or reboot
 `update-readonly.sh` runs `install.sh` and `readonly.sh units` on the
 running system, stages Lookout's code (without `node_modules` and
 `storage`), a linked xdrip-js checkout and every installed file in RAM, then
-unlocks the card, copies them onto it, deletes the old swap file and the old
-`g7-new-sensor` from the card itself (literal paths, never through the
+unlocks the card, copies them onto it, deletes the old swap file, the old
+`g7-new-sensor` and the hand-installed `lab-netwatch` from the card itself (literal paths, never through the
 overlay), drops the caches, relocks the card and checks byte for byte that
 the card has what was staged. Lookout's storage, the env file and
 `/etc/g7-central` are left to `g7-rig persist`. A reboot is needed only
@@ -540,6 +547,93 @@ the journal is in RAM and gone after the reboot):
   `inactive`. `sudo systemctl start g7-alive` arms it again (so does a
   reboot).
 
+### The network watchdog
+
+A Pi Zero W collector twice dropped off Wi-Fi while powered and only came
+back after a power cycle. `g7-netwatch.timer` (installed and enabled by
+`install.sh`) runs `/usr/local/sbin/g7-netwatch` through
+`g7-netwatch.service` 3 minutes after boot and then every minute, at nice
+10. Each run pings the default gateway (`ping -c 2 -W 3`); the network is
+OK if it answers. No default route counts as down. Each run that is not OK
+counts as one minute down; its state is in `/run/g7-netwatch/` (cleared at
+reboot).
+
+It reboots (`systemctl reboot`, a normal clean reboot, after one log line
+and `journalctl --sync`) in two cases:
+
+- **10 minutes down after the network worked earlier this boot.** That is
+  the case it was written for: the Wi-Fi fell over while the device was
+  running.
+- **60 minutes down when it has not worked at all since boot** (router
+  off, wrong Wi-Fi password, out of range). A reboot does not fix these,
+  and a collector keeps reading the sensor without a network (uploads catch
+  up later), so it waits longer: a long router outage costs at most one
+  reboot an hour instead of one every 13 minutes.
+
+It logs nothing while the network is fine. When it is down (the gateway
+here is an example):
+
+```
+network down: gateway 192.168.1.1 does not answer; rebooting if still down after 10 min
+network down: no default route; no network yet since boot, rebooting if still down after 60 min
+network still down after 5 min: gateway 192.168.1.1 does not answer
+network back after 7 min down (gateway 192.168.1.1 answers)
+network down for 10 min after working earlier this boot: rebooting
+no network for 60 min since boot: rebooting
+```
+
+The first line (or the second) when it first sees the network down, one
+"still down" line every 5 minutes, "back" when the gateway answers again,
+and one "rebooting" line before it reboots. See them with
+`journalctl -t g7-netwatch -b`. While the network is down you cannot reach
+the device over it, and the journal is in RAM, so after its reboot these
+lines are gone; to see it act, keep `journalctl -t g7-netwatch -f` open on a
+local console, or look at the lines from an outage it recovered from.
+
+**Checking it without cutting the network.** `--dry-run` does one check
+but never reboots and never writes to the journal; it prints what it would
+do instead, and keeps its state in a directory of its own. Pinging an
+address that does not answer (192.0.2.1 is reserved for documentation and
+never used) stands in for a dead gateway. No `sudo` needed:
+
+```sh
+D=/tmp/netwatch-test; rm -rf $D
+G7_NETWATCH_STATE_DIR=$D /usr/local/sbin/g7-netwatch --dry-run
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  G7_NETWATCH_STATE_DIR=$D G7_NETWATCH_GATEWAY=192.0.2.1 /usr/local/sbin/g7-netwatch --dry-run
+done
+G7_NETWATCH_STATE_DIR=$D /usr/local/sbin/g7-netwatch --dry-run
+rm -rf $D
+```
+
+The first run prints `network OK: gateway <your gateway> answers (state in
+/tmp/netwatch-test)`; the loop (about 4 s a run) prints
+`network down: gateway 192.0.2.1 does not answer; rebooting if still down
+after 10 min`, then `network still down after 5 min: ...` at the fifth run,
+and at the tenth `network down for 10 min after working earlier this boot:
+would reboot now (dry run: not rebooting)`; the last run prints
+`network back after 10 min down (gateway <your gateway> answers)`. Leave
+out the first run to see the never-up case (nothing at 10, the reboot
+line at 60). The real watchdog's state is not touched. The other settings
+can be changed the same way for a test: `G7_NETWATCH_REBOOT_MIN` (10),
+`G7_NETWATCH_NEVER_UP_REBOOT_MIN` (60), `G7_NETWATCH_LOG_EVERY_MIN` (5).
+
+**Turning it off:** `sudo systemctl disable --now g7-netwatch.timer`. On a
+read-only card that lasts until the next boot; to keep it off, also delete
+`/media/root-ro/etc/systemd/system/timers.target.wants/g7-netwatch.timer`
+with the card unlocked. `install.sh` (and so `update-readonly.sh`) enables
+it again.
+
+Verified here: the script under sh and dash with stubbed `ip`, `ping`,
+`logger`, `journalctl` and `systemctl` (silent when the gateway answers; no
+reboot after 9 minutes, one at 10 after having been up; none at 10 and one
+at 60 when never up; the recovery line and reset; no default route counts
+as down; `--dry-run` never reboots), the install and card-mirror lines,
+`sh -n` of every script. Not verified without a device: the timer and
+service under systemd, `ping` and `ip` output on a Pi, a real reboot, and
+the removal of `lab-netwatch`.
+Verified on the devices: <to be filled in after deployment>
+
 ### Swap off
 
 The rpi-swap drop-in says `Mechanism=none` (no zram, no swap file). About
@@ -582,6 +676,10 @@ journalctl -u g7-alive -b         # "card check: one direct read from /dev/mmcbl
 systemctl show g7-alive -p WatchdogTimestamp               # at most 30 s old
 systemctl list-timers g7-bt-watchdog.timer g7-persist.timer
 journalctl -u g7-bt-watchdog.service --since -1h           # quiet unless it misses or restarts
+systemctl list-timers g7-netwatch.timer                    # next run within a minute
+cat /run/g7-netwatch/down                                  # 0 (minutes down in a row)
+journalctl -t g7-netwatch -b                               # nothing unless the network was down
+systemctl list-unit-files 'lab-netwatch*'                  # 0 unit files listed (the old one is gone)
 ```
 
 ### Undoing each change
@@ -613,6 +711,10 @@ unlocked ([section 5](#5-safe-to-unplug-the-read-only-card)).
   `/media/root-ro/etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer`.
   `install.sh` (and so `update-readonly.sh`) enables it again.
 - Alive watchdog: [Turning it off](#the-alive-watchdog).
+- Network watchdog: `sudo systemctl disable --now g7-netwatch.timer`; on a
+  read-only card also delete
+  `/media/root-ro/etc/systemd/system/timers.target.wants/g7-netwatch.timer`.
+  `install.sh` (and so `update-readonly.sh`) enables it again.
 
 Verified here: the health parsing and the status JSON (unit tests with real
 `/proc` text and a fake `exec`), the alive script's rounds with stubbed
@@ -721,13 +823,30 @@ not dangerous at once, but a power cut while it is writable can corrupt it.
 
 ### It reboots repeatedly
 
-- `uptime` and `journalctl -u g7-alive -b`: card read errors or "no answer"
-  lines before a reboot point at the card. Stop the alive watchdog within 5
-  minutes of boot if it reboots a healthy device
-  ([turning it off](#the-alive-watchdog)).
-- `grep -o -- '--no_reboot' /etc/lookout.env`: without it Lookout reboots
-  after repeated failed reads (`Too many read failures ... rebooting rig`
-  in the log).
+Three things can reboot a collector on purpose: the alive watchdog, the
+network watchdog and Lookout itself (without `--no_reboot`). The journal is
+in RAM, so the reboot erases the reason; tell them apart by what came
+before it, or keep `journalctl -f -u g7-alive -t g7-netwatch -u lookout`
+open from a second session (a local console for the network watchdog,
+since SSH drops with the network) until it happens again:
+
+- **Alive watchdog** (`g7-alive`): the device was busy in the UI (SSH
+  connects, no answer) for about 5 minutes, then rebooted at once, without
+  a clean shutdown. `journalctl -u g7-alive -b`: card read errors or
+  "no answer" lines point at the card. Stop it within 5 minutes of boot if
+  it reboots a healthy device ([turning it off](#the-alive-watchdog)).
+- **Network watchdog** (`g7-netwatch`): the device was offline in the UI
+  (no SSH at all) for about 10 minutes, or for an hour if the network never
+  came up after boot, then rebooted cleanly. Its last line is
+  `... : rebooting`. `journalctl -t g7-netwatch -b` after it comes back shows
+  any outage of this boot. Reboots once an hour mean the network never
+  comes up: check the router, the Wi-Fi password and the signal, or turn it
+  off ([turning it off](#the-network-watchdog)).
+- **Lookout**: `grep -o -- '--no_reboot' /etc/lookout.env`: without it
+  Lookout reboots after repeated failed reads (`Too many read failures ...
+  rebooting rig` in its log), while the device stays reachable.
+Not on purpose:
+
 - `vcgencmd get_throttled` not `0x0`: under-voltage; use a better supply
   or cable.
 - `sudo dmesg | grep -i "out of memory"` and `health`: memory; check that
