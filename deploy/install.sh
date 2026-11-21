@@ -11,6 +11,8 @@ NODE=$(sudo -u "$USER_NAME" sh -c 'command -v node' || true)
 [ -n "$NODE" ] || { [ -x /opt/node/bin/node ] && NODE=/opt/node/bin/node; }
 [ -n "$NODE" ] || { echo "node not found" >&2; exit 1; }
 NODE_BIN=$(dirname "$NODE")
+# g7-rig-remote (the UI's forced command) runs /opt/node/bin/node: sudo resets PATH
+[ -x /opt/node/bin/node ] || echo "warning: /opt/node/bin/node not found: g7-rig over SSH will not work (deploy/README.md, Node)" >&2
 
 sed -e "s#@USER@#$USER_NAME#g" -e "s#@DIR@#$DIR#g" -e "s#@NODE_BIN@#$NODE_BIN#g" \
   "$HERE/systemd/lookout.service" > /etc/systemd/system/lookout.service

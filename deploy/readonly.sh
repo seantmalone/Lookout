@@ -210,6 +210,10 @@ case "$ACTION" in
     skip_remount_fs_when_readonly
     swap_off
     remove_swapfile_writable_card
+    # update-readonly.sh needs rsync, which cannot be installed once the card is read-only
+    if ! command -v rsync >/dev/null 2>&1; then
+      env DEBIAN_FRONTEND=noninteractive apt-get install -y -q rsync
+    fi
     if ! dpkg -s overlayroot >/dev/null 2>&1; then
       # the package regenerates the initramfs images on the boot partition
       with_boot_rw env DEBIAN_FRONTEND=noninteractive apt-get install -y -q overlayroot

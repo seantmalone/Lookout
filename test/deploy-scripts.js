@@ -278,6 +278,27 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('rsync for update-readonly.sh', () => {
+    it('readonly.sh enable installs rsync while the card is still writable', () => {
+      /^ {2}enable\)\n[\s\S]*?command -v rsync[\s\S]*?apt-get install -y -q rsync[\s\S]*?set_cmdline on[\s\S]*?;;/m
+        .test(read('readonly.sh')).should.equal(true);
+    });
+
+    it('update-readonly.sh stops before changing anything when rsync is missing', () => {
+      const s = read('update-readonly.sh');
+      const check = s.indexOf('command -v rsync');
+      check.should.be.above(-1);
+      check.should.be.below(s.indexOf('sh "$HERE/install.sh"'));
+    });
+  });
+
+  describe('install.sh and Node under /opt/node', () => {
+    it('warns when /opt/node/bin/node (what g7-rig-remote runs) is missing', () => {
+      read('g7-rig-remote.sh').should.match(/NODE=\$\{G7RIG_NODE:-\/opt\/node\/bin\/node\}/);
+      read('install.sh').should.match(/\[ -x \/opt\/node\/bin\/node \] \|\| echo "warning: /);
+    });
+  });
+
   describe('g7-bt-watchdog units', () => {
     it('install.sh installs the service and enables the timer', () => {
       const s = read('install.sh');

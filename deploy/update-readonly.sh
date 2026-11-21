@@ -18,6 +18,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=$(dirname "$HERE")
 L=/media/root-ro
 [ "$(findmnt -no FSTYPE /)" = overlay ] || { echo "the card is not read-only: use deploy/install.sh" >&2; exit 1; }
+command -v rsync >/dev/null 2>&1 || { echo "rsync is not installed (readonly.sh enable installs it; on this card: readonly.sh disable --reboot, apt-get install rsync, enable --reboot)" >&2; exit 1; }
 
 sh "$HERE/install.sh"
 sh "$HERE/readonly.sh" units
