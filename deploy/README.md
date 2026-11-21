@@ -214,12 +214,18 @@ read-only (step 10) changes to the system last only until the next boot.
 5. **Checkout.** This fork's `g7-fixes` branch of Lookout in `~/src/Lookout`,
    and `npm install` there. The fleet also needs this fork's xdrip-js
    (`g7-fixes`, [section 9](#9-known-limits-and-open-questions)).
-   `package.json` names that branch, but `package-lock.json` pins an older
-   commit of it without the fleet changes, so use a checkout of xdrip-js
-   next to Lookout and link it:
+   `package.json` names that branch and `package-lock.json` pins a commit of
+   it with the fleet changes, so a plain `npm install` gives a working fleet
+   collector:
 
    ```sh
    cd ~/src/Lookout && npm install
+   ```
+
+   A checkout of xdrip-js next to Lookout, linked in place of the installed
+   one, is only for developing xdrip-js:
+
+   ```sh
    rm -rf node_modules/xdrip-js && ln -s ../../xdrip-js node_modules/xdrip-js   # ~/src/xdrip-js, branch g7-fixes
    (cd ~/src/xdrip-js && npm install --omit=dev)                              # its own dependencies
    ```
@@ -897,5 +903,7 @@ reading until they get the new key.
 
   The intention is to move onto upstream Lookout and xdrip-js once their G7
   branches are merged, keeping only what the fleet still needs.
-- `package-lock.json` pins an older xdrip-js commit than the fleet needs
-  ([section 2, step 5](#2-setting-up-a-collector)).
+- `package-lock.json` pins one commit of xdrip-js's `g7-fixes` branch; later
+  changes to that branch reach a collector only after the lock file is
+  updated (or with a linked checkout,
+  [section 2, step 5](#2-setting-up-a-collector)).
