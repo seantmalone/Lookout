@@ -632,7 +632,14 @@ as down; `--dry-run` never reboots), the install and card-mirror lines,
 `sh -n` of every script. Not verified without a device: the timer and
 service under systemd, `ping` and `ip` output on a Pi, a real reboot, and
 the removal of `lab-netwatch`.
-Verified on the devices: <to be filled in after deployment>
+Verified on the devices (2026-11-21, two Pi Zero W collectors): the timer runs every minute on
+both, with `up` set and `down` at 0, no log lines and no failed units; the old hand-installed
+version was removed from the running system and the card of the device that had it, and the
+card relocked. In `--dry-run` with an unreachable test gateway the script logged the outage,
+the five-minute reminder and "would reboot now" at minute 10 after a working run, and with no
+working run it did not ask for a reboot in the first 12 minutes. Not verified: a real outage
+and the reboot itself (the predecessor's reboot was never observed either), and the
+60-minute case beyond minute 12.
 
 ### Swap off
 
