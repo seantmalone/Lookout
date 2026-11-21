@@ -1,40 +1,117 @@
-# Lookout on a Raspberry Pi with a Dexcom G7
+# Lookout collectors for a Dexcom G7
 
-Tested with a Pi Zero W (single core), Raspberry Pi OS with BlueZ 5.82, and
-Node 22. Lookout reads the G7 on the **watch** display slot (3), so the
-pump (slot 1, for example an Omnipod 5) and the phone app (slot 2) keep their
-own connections.
+How to set up, run and debug a **collector**: a Raspberry Pi that reads a
+Dexcom G7 with Lookout and uploads to Nightscout, as one of a fleet managed
+by a separate UI device. Tested with a Pi Zero W (single core), Raspberry Pi
+OS 13 (trixie) with BlueZ 5.82 and systemd 257, and Node 22.
 
-## Install
+Placeholders used below: `collector-a`, `collector-b` (collectors),
+`ui-device` (the fleet UI), `pi` (the login user that runs Lookout),
+`1234` (a sensor code), `DXCMxx` (a sensor name), `AA:BB:CC:DD:EE:FF` (a
+Bluetooth address).
+
+## Contents
+
+1. [What a collector is](#1-what-a-collector-is)
+2. [Setting up a collector](#2-setting-up-a-collector)
+3. [Updating a collector](#3-updating-a-collector)
+4. [Pairing a sensor](#4-pairing-a-sensor)
+5. [Safe to unplug: the read-only card](#5-safe-to-unplug-the-read-only-card)
+6. [Memory, watchdogs and health](#6-memory-watchdogs-and-health)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Testing another Lookout or xdrip-js build on a collector](#8-testing-another-lookout-or-xdrip-js-build-on-a-collector)
+9. [Known limits and open questions](#9-known-limits-and-open-questions)
+
+## 1. What a collector is
+
+### The fleet model
+
+Lookout reads the G7 on the **watch** display slot (3), so the pump (slot 1,
+for example an Omnipod 5) and the phone app (slot 2) keep their own
+connections. Several collectors (in different rooms, say) read the same
+sensor on that one slot:
+
+- **One shared key.** A G7 slot holds one pairing key. One collector pairs;
+  the fleet UI copies the resulting key to the others. If each collector
+  paired by itself, every pairing would replace the slot's key and lock the
+  others out.
+- **One shared Bluetooth address.** The G7 ties the slot's key to the
+  Bluetooth address of the collector that paired: a key presented from any
+  other address is refused. So every collector presents the same public
+  address. The address travels with the key (`central` in the key record);
+  `import-key` stores it in `/etc/g7-central`, and `g7-central.service`
+  (`/usr/local/sbin/g7-central-apply`) sets the adapter to it at every boot,
+  after `bluetooth.service` and before `lookout.service`. The collector that
+  paired already has that address and needs no `/etc/g7-central` (it gets
+  one only if the UI imports the record into it as well).
+- **Never pairs by itself** (`--no_auto_pair`). A collector with a key
+  only authenticates with it; if the sensor refuses it, Lookout logs it,
+  marks the key rejected (`pairing.state` `failed` in `status`) and waits.
+  It runs a pairing only when `g7-rig pair` asked for one.
+- **Never reboots on failed reads** (`--no_reboot`). Upstream Lookout
+  reboots the rig after repeated failed reads. In a fleet, failed reads
+  usually just mean the wearer is near another collector.
+- **No duplicate uploads.** In fleet mode Lookout asks Nightscout for an
+  `sgv` entry within 2.5 minutes of a reading before uploading it, so one
+  reading heard by two collectors is stored once. If that check fails it
+  uploads anyway.
+- **Managed over SSH.** The UI device (a separate project, with its own
+  `dexcom-ui.service`; it can be a collector too) polls every collector through a locked-down
+  account and runs the commands below.
+
+### g7-rig: the UI's interface
+
+`/usr/local/sbin/g7-rig.js` (its logic in `/usr/local/lib/g7rig`), run as
+root. Over SSH only these forms are accepted:
+
+| Command | What it does |
+|---|---|
+| `status` | JSON: host, Lookout version and state, the sensor (`code`, `name`, `address`, `key_fingerprint`, `session_start`, `session_length_s`, `paired_at`, `central`), `last_reading`, `last_heard`, `pairing` (`idle`, `waiting`, `paired`, `failed`), up to 5 recent error lines and `health` ([section 6](#health-in-g7-rig-status)). Only a fingerprint of the key (first 12 hex characters of its SHA-256), never the key. |
+| `pair NNNN` | Starts a pairing with code `NNNN` ([section 4](#4-pairing-a-sensor)). Returns within seconds. |
+| `export-key` | Prints `{code, name, address, key, central, paired_at}` (`name` may be null; `central` and `paired_at` may be missing). The only command that outputs the key. |
+| `import-key` | Reads that record on stdin: stores the key, code, name and `paired_at`, removes the old Bluetooth bonds, writes `/etc/g7-central` and sets the adapter's address if the record has `central`, saves to the card, restarts Lookout. |
+| `scan DXCMxx` | Listens 70 s for that sensor name; prints `{heard, rssi, address}`. A diagnostic: pairing does not use it. |
+
+`pair` and `import-key` also make the env file a collector's: they add
+`--no_auto_pair`, `--no_reboot` and `--display_type watch` if missing,
+remove any `--sensor_address` pin, and refuse (exit 3) if `LOOKOUT_ARGS`
+selects the medical slot (`--display_type medical`, `--force_medical_slot`,
+`--alternate`). Exit codes: 0 ok, 1 error, 2 rejected command, 3 refused.
+
+Two more commands run only locally, from systemd units: `persist`
+([section 5](#5-safe-to-unplug-the-read-only-card)) and `bt-watchdog`
+([section 6](#the-bluetooth-watchdog)). To run any command on the collector
+itself:
 
 ```sh
-cd ~/src/Lookout && npm install
-sudo deploy/install.sh          # units, Bluetooth fix, g7-rig, Bluetooth and alive watchdogs
-sudoedit /etc/lookout.env       # Nightscout host and secret
-sudo systemctl enable --now lookout
-lookout id <code>
+sudo /opt/node/bin/node /usr/local/sbin/g7-rig.js status
 ```
 
-`<code>` is the 4-digit pairing code from the sensor package.
+### The g7rig account
 
-## New sensor
+`deploy/setup-g7rig-access.sh` creates the system user `g7rig`:
 
-Only the code is needed. Lookout tries each `DXCM` sensor it hears, keeps the
-one that accepts the code, and from then on connects only to that sensor's
-address. It pairs at the sensor's next 5-minute reading.
+- **No password** (`*`), login only with the UI's key, in
+  `~g7rig/.ssh/authorized_keys` as
+  `restrict,command="sudo /usr/local/sbin/g7-rig-remote" <key>`: whatever
+  the UI asks for, sshd runs the forced command, with no shell, port
+  forwarding or terminal.
+- **sudoers** (`/etc/sudoers.d/g7rig`): `g7rig` may run exactly
+  `/usr/local/sbin/g7-rig-remote` as root, keeping `SSH_ORIGINAL_COMMAND`.
+- **The wrapper** (`/usr/local/sbin/g7-rig-remote`) accepts exactly the
+  forms in the table above (`DXCM` plus 2 letters or digits, 4 digits) and
+  logs and rejects anything else (exit 2); `g7-rig.js` checks the same rules
+  again. It runs `/opt/node/bin/node` (sudo resets `PATH`).
+- **Priority.** The wrapper runs `g7-rig.js` at nice 10 and, where
+  `ionice` exists, best-effort I/O priority 7: low enough not to disturb
+  Lookout (nice -15), high enough to finish while bluetoothd and
+  dbus-daemon (nice 0) are busy. At nice 19 with idle I/O, `status` missed
+  the UI's timeout during every failing Lookout read.
+- **Linger** (`loginctl enable-linger g7rig`): keeps g7rig's systemd user
+  manager running; otherwise each SSH login (one a minute from the UI)
+  starts a fresh one, about 2.5 s of CPU on a Pi Zero.
 
-- **Fleet collector**: pair it from the fleet UI, which runs
-  `g7-rig pair <code>` (see below).
-- **Standalone rig**: run Lookout's own `lookout id <code>`. It stores the
-  code and clears the old key and calibration.
-
-To pin a rig to one sensor even before pairing, add
-`--sensor_address <mac>` to `LOOKOUT_ARGS`.
-
-If you can, pair Lookout before the pump and the phone app connect to a fresh
-sensor. Pairing a running sensor also works.
-
-## Why the system changes are needed
+### Why the system changes are needed
 
 - **`bluetooth.service.d/g7.conf`** (`bluetoothd --noplugin=gap`). After
   service discovery, BlueZ's GAP plugin reads the G7's preferred connection
@@ -49,73 +126,274 @@ sensor. Pairing a running sensor also works.
   replies. A multi-core Pi (Zero 2 W or later) has more headroom.
 - **`--no_xdripaps`**. Skips posting to a local OpenAPS xDripAPS server on
   127.0.0.1:5000, which a Lookout-only rig doesn't have.
+- **`--openaps`**. Lookout watches a few OpenAPS files there. The default,
+  `/root/myopenaps`, cannot be read by the non-root user Lookout runs as;
+  point it at a directory in that user's home. It need not exist.
 
-Pairing details live in xdrip-js:
+Pairing details live in xdrip-js: P-256 maths through OpenSSL, proof checks
+deferred until after each reply, write-without-response fragments, and the
+Authentication subscription made before ExtraData.
 
-- P-256 maths through OpenSSL
-- proof checks deferred until after each reply
-- write-without-response fragments
-- the Authentication subscription made before ExtraData
+### What is installed where
 
-## Fleet (g7-rig)
+| On the collector | From | By |
+|---|---|---|
+| `/etc/systemd/system/lookout.service`, `lookout.service.d/priority.conf` | `deploy/systemd/` | `install.sh` |
+| `/etc/systemd/system/bluetooth.service.d/g7.conf` | `deploy/systemd/` | `install.sh` |
+| `/etc/lookout.env` (only if missing) | `deploy/lookout.env.example` | `install.sh` |
+| `/usr/local/sbin/g7-rig.js`, `/usr/local/lib/g7rig/*.js`, `/usr/local/sbin/g7-rig-remote` | `deploy/`, `lib/g7rig/` | `install.sh`, `setup-g7rig-access.sh` |
+| `/usr/local/sbin/g7-central-apply`, `g7-central.service` (enabled) | `deploy/` | `install.sh` |
+| `g7-bt-watchdog.service`, `g7-bt-watchdog.timer` (enabled) | `deploy/systemd/` | `install.sh` |
+| `/usr/local/sbin/g7-alive`, `g7-alive.service` (enabled) | `deploy/` | `install.sh` |
+| user `g7rig` (linger), its `authorized_keys`, `/etc/sudoers.d/g7rig` | | `setup-g7rig-access.sh` |
+| `/etc/systemd/journald.conf.d/zz-unplug-safe.conf`; apt-daily, apt-daily-upgrade, man-db timers and unattended-upgrades off; `/boot/firmware` read-only in `/etc/fstab`; `dtoverlay=vc4-kms-v3d,cma-64` | | `harden.sh` |
+| `g7-persist.service`, `g7-persist.timer`, `g7-persist.path` (enabled); `systemd-remount-fs.service.d/overlayroot.conf`; `/etc/rpi/swap.conf.d/90-g7-readonly.conf`; packages `overlayroot`, `rsync`; `overlayroot=tmpfs` in `/boot/firmware/cmdline.txt` | `deploy/systemd/`, generated | `readonly.sh enable` (`units` for the first three) |
+| `/etc/g7-central` | the key record | `g7-rig import-key` |
 
-Several collectors can share one sensor: one of them pairs, and the fleet UI
-copies the resulting key to the others. `install.sh` installs the collector
-side, `/usr/local/sbin/g7-rig.js` (its logic in `/usr/local/lib/g7rig`) and
-the forced-command wrapper `/usr/local/sbin/g7-rig-remote`.
+`install.sh` also deletes `/usr/local/sbin/g7-new-sensor`, an older script
+that `g7-rig pair` replaced (`update-readonly.sh` deletes it from the card).
+
+## 2. Setting up a collector
+
+In this order; steps 1 to 9 on a writable card, because once the card is
+read-only (step 10) changes to the system last only until the next boot.
+
+1. **Flash** Raspberry Pi OS Lite 13 (trixie), 32-bit for a Pi Zero W, with
+   Raspberry Pi Imager: set the host name, the user, Wi-Fi and your SSH key
+   there. Its kernel command line already has `fsck.repair=yes` (`harden.sh`
+   checks it); keep it.
+2. **Wi-Fi power save off.** On the devices it is off; no script does it.
+   With NetworkManager, per Wi-Fi connection:
+
+   ```sh
+   nmcli -t -f NAME,TYPE connection show            # the Wi-Fi connection's name
+   sudo nmcli connection modify "<connection>" 802-11-wireless.powersave disable
+   nmcli -g 802-11-wireless.powersave connection show "<connection>"   # disable
+   ```
+
+   Active after the connection is next brought up (or a reboot).
+3. **Bluetooth not blocked.** `rfkill` is not installed on Raspberry Pi OS
+   Lite; read the state from `/sys` (`soft` and `hard` must be 0 for the
+   `bluetooth` entry), and check that the adapter is powered:
+
+   ```sh
+   grep . /sys/class/rfkill/rfkill*/type /sys/class/rfkill/rfkill*/soft /sys/class/rfkill/rfkill*/hard
+   bluetoothctl show | grep -E 'Controller|Powered'
+   ```
+
+   To unblock: `echo 0 | sudo tee /sys/class/rfkill/rfkillN/soft` (N from
+   the listing). systemd-rfkill restores the saved state at each boot, which
+   on a read-only card is the one saved on the card: unblock before step 10.
+4. **Node 22 in `/opt/node`.** The devices run Node v22.23.4 there;
+   `g7-rig-remote` and the units expect `/opt/node/bin/node`. The Pi Zero W
+   is ARMv6, for which nodejs.org has no official builds; the unofficial
+   builds have one (`node-v22.x.y-linux-armv6l.tar.xz` from
+   https://unofficial-builds.nodejs.org/download/release/). On a newer Pi
+   use the official `linux-armv7l` or `linux-arm64` build.
+
+   ```sh
+   V=v22.x.y                                  # a current Node 22 release
+   curl -fLO https://unofficial-builds.nodejs.org/download/release/$V/node-$V-linux-armv6l.tar.xz
+   sudo mkdir -p /opt/node
+   sudo tar -xJf node-$V-linux-armv6l.tar.xz -C /opt/node --strip-components=1
+   echo 'PATH=/opt/node/bin:$PATH' >> ~/.profile && . ~/.profile
+   node --version
+   ```
+
+5. **Checkout.** This fork's `g7-fixes` branch of Lookout in `~/src/Lookout`,
+   and `npm install` there. The fleet also needs this fork's xdrip-js
+   (`g7-fixes`, [section 9](#9-known-limits-and-open-questions)).
+   `package.json` names that branch, but `package-lock.json` pins an older
+   commit of it without the fleet changes, so use a checkout of xdrip-js
+   next to Lookout and link it:
+
+   ```sh
+   cd ~/src/Lookout && npm install
+   rm -rf node_modules/xdrip-js && ln -s ../../xdrip-js node_modules/xdrip-js   # ~/src/xdrip-js, branch g7-fixes
+   (cd ~/src/xdrip-js && npm install --omit=dev)                              # its own dependencies
+   ```
+
+   `update-readonly.sh` copies such a linked xdrip-js checkout onto the card
+   along with Lookout (not its `node_modules`). How the devices' checkouts
+   and dependencies were first installed is not recorded.
+6. **`sudo deploy/install.sh`**: the units, the Bluetooth fix, g7-rig, both
+   watchdogs ([table above](#what-is-installed-where)). It restarts
+   `bluetooth` and `g7-alive`; it never restarts Lookout. Re-run it after
+   every update (on a read-only card `update-readonly.sh` does).
+7. **The env file**: `sudoedit /etc/lookout.env`. Set `NIGHTSCOUT_HOST` and
+   `API_SECRET`, and `LOOKOUT_ARGS` in this shape (the example has it; the
+   devices run exactly these options):
+
+   ```sh
+   LOOKOUT_ARGS=--openaps /home/pi/myopenaps --display_type watch --no_xdripaps --no_auto_pair --no_reboot
+   ```
+
+   Never `--force_medical_slot` or `--display_type medical`: slot 1 is the
+   pump's. Then `sudo systemctl enable --now lookout`. Lookout creates its
+   `storage` directory on its first start (`readonly.sh enable` needs it).
+   With `--no_auto_pair` and no key it logs `Fleet mode: not connecting
+   (waiting for a key)` every 30 s until the
+   UI copies the fleet's key or you pair ([section 4](#4-pairing-a-sensor)).
+8. **Access for the UI**, once per collector, with the UI's public key:
+
+   ```sh
+   sudo deploy/setup-g7rig-access.sh "$(cat ui-key.pub)"
+   ssh -i <ui private key> g7rig@collector-a status      # from the UI device
+   ```
+
+   Then add the collector to the UI's configuration (see the UI project).
+9. **`sudo deploy/harden.sh`**: logs in RAM, no unattended apt/man-db
+   activity, boot partition read-only, the `fsck.repair=yes` check, 64 MB
+   CMA ([section 5](#5-safe-to-unplug-the-read-only-card) and
+   [6](#6-memory-watchdogs-and-health)).
+10. **`sudo deploy/readonly.sh enable --reboot`**: the read-only card
+    ([section 5](#5-safe-to-unplug-the-read-only-card)). It installs
+    `overlayroot` and `rsync` if missing, the persist units and the swap
+    drop-in, and reboots.
+
+What takes effect when:
+
+| Change | Active |
+|---|---|
+| `install.sh` (units, g7-rig, watchdogs, Bluetooth fix) | at once (Lookout: after `systemctl restart lookout`) |
+| `/etc/lookout.env` | at the next Lookout restart |
+| `setup-g7rig-access.sh` | at once |
+| `harden.sh`: journald, apt timers, boot partition read-only | at once |
+| `harden.sh`: 64 MB CMA | next boot |
+| `readonly.sh enable` / `disable` | next boot |
+| swap drop-in (`readonly.sh enable` / `units`) | next boot |
+| `/etc/g7-central` | at once when `import-key` writes it; at every boot after |
+
+**A standalone rig** (no fleet UI, pairs by itself) needs only steps 1 to 7
+(and 9, 10 if it is unplugged without shutdown): leave `--no_auto_pair` and
+`--no_reboot` out of `LOOKOUT_ARGS`, and set the code with
+`~/src/Lookout/lookout.js id 1234`, which also clears the old key and
+calibration. `--sensor_address AA:BB:CC:DD:EE:FF` pins such a rig to one
+sensor.
+
+## 3. Updating a collector
+
+On a **writable** card: update the checkout, `sudo deploy/install.sh`,
+`sudo systemctl restart lookout`.
+
+On a **read-only** card everything written goes to RAM, so the update must
+also be written onto the card:
 
 ```sh
-sudo deploy/setup-g7rig-access.sh "$(cat ui-key.pub)"   # once per collector
-ssh g7rig@<collector> status                            # from the UI device
+rsync -rlt --exclude=node_modules --exclude=/storage --exclude='/storage.*' --exclude=.git Lookout/ pi@collector-a:src/Lookout/   # from your computer
+ssh pi@collector-a
+sudo ~/src/Lookout/deploy/update-readonly.sh
+sudo systemctl restart lookout        # or reboot
 ```
 
-The setup script creates the user `g7rig`, whose key may only run
-`sudo g7-rig-remote`. The wrapper allows exactly `status`, `scan DXCMxx`,
-`pair NNNN`, `export-key` and `import-key`, and logs and rejects anything
-else (exit 2).
+`update-readonly.sh` runs `install.sh` and `readonly.sh units` on the
+running system, stages Lookout's code (without `node_modules` and
+`storage`), a linked xdrip-js checkout and every installed file in RAM, then
+unlocks the card, copies them onto it, deletes the old swap file and the old
+`g7-new-sensor` from the card itself (literal paths, never through the
+overlay), drops the caches, relocks the card and checks byte for byte that
+the card has what was staged. Lookout's storage, the env file and
+`/etc/g7-central` are left to `g7-rig persist`. A reboot is needed only
+for a swap change. Not covered: `node_modules` (to change dependencies:
+`readonly.sh disable --reboot`, `npm install`, `install.sh`,
+`readonly.sh enable --reboot`), the g7rig account, `harden.sh`'s changes
+under `/etc` and anything else outside its list; use the same
+disable/enable round for those. `harden.sh`'s CMA edit does work on a
+read-only card (the boot partition is not under the overlay; it takes
+effect at the next boot).
 
-- `status` prints JSON: the sensor, last reading, last heard, the pairing
-  state, recent errors and `health` (load, memory, swap, RAM overlay,
-  throttling: see "A collector that stalled" below). It shows only a
-  fingerprint of the key (the first 12 hex characters of its SHA-256),
-  never the key.
-- `pair NNNN` stores the code, clears the old key, name, calibration and
-  Bluetooth bond, removes any `--sensor_address` pin, and asks Lookout
-  (which runs with `--no_auto_pair`) to pair with the sensor that accepts the
-  code. It returns at once; the sensor's name is learned when it pairs.
-- `export-key` prints `{code, name, address, key}` (`name` may be null). This
-  is the only command that outputs the key. `import-key` reads that record on
-  stdin, installs it and restarts Lookout; the key's address is the only
-  sensor Lookout then connects to.
-- `pair` and `import-key` refuse (exit 3) if `LOOKOUT_ARGS` selects the
-  medical slot (`--display_type medical`, `--force_medical_slot`,
-  `--alternate`).
+## 4. Pairing a sensor
 
-## Safe to unplug
+The UI's New sensor screen runs this on one collector:
+
+```sh
+ssh g7rig@collector-a pair 1234
+```
+
+Only the 4-digit code from the sensor package is needed. `pair` stops
+Lookout, stores the code and a pair request, clears the old key, name,
+`paired_at`, calibration (back to unity) and the old sensor's Bluetooth
+bond, makes the env file a collector's (no pin), saves to the card and
+starts Lookout again. It returns at once.
+
+Lookout (with `--no_auto_pair` and the pair request) then connects to each
+`DXCM` sensor it hears and runs the pairing with the code. The sensor that
+accepts it is the right one: Lookout stores its key with that sensor's
+address (`sensorKey`) and from then on connects only to that address.
+The name (`DXCMxx`) is learned from that sensor's advertisement afterwards.
+A sensor pairs at its next 5-minute reading; `status` shows `pairing.state`
+`waiting`, then `paired`, or `failed` (`not heard` after 15 minutes,
+`rejected: check the code`).
+
+The key reaches the other collectors through the UI: `export-key` on the
+collector that paired, `import-key` on each of the others; the UI's sync
+repeats that for any collector that was offline. The record carries the
+shared Bluetooth address (`central`, [section 1](#the-fleet-model)).
+
+**`paired_at`** is when the key was paired (Lookout stores `pairedAt` when a
+requested pairing succeeds; `import-key` copies it). The UI keeps its own
+record of the current key with its `paired_at`; when a collector holds a
+different key paired *after* that record (say a pairing that finished after
+the UI gave up waiting), the UI adopts that key and shares it, instead of
+overwriting it with the older one.
+
+If you can, pair before the pump and the phone app connect to a fresh
+sensor. Pairing a running sensor also works.
+
+## 5. Safe to unplug: the read-only card
 
 Collectors get moved around and some have no screen, so they must survive
 losing power at any moment.
 
-1. `sudo deploy/harden.sh`: logs in RAM, no unattended apt/man-db activity
-   (a power cut mid-upgrade can break dpkg), boot partition read-only,
-   automatic fsck at boot, 64 MB CMA instead of 256 MB (see below). Lookout and g7-rig already write their data
-   crash-safely (temp file, fsync, rename, fsync the directory).
-2. `sudo deploy/readonly.sh enable --reboot`: the whole SD card becomes
-   read-only (overlayroot); everything written while running goes to RAM.
-   What must survive is copied onto the card by `g7-rig persist`, which
-   unlocks the card, writes crash-safely and relocks it (verified):
-   - Lookout's sensor items (code, key, name, pairing state, session length)
-   - `/etc/lookout.env`
-   - the current sensor's Bluetooth bond (the stored key's address) (old sensors' bonds are dropped)
+- **`harden.sh`**: logs in RAM (journald `Storage=volatile`, the
+  `zz-` drop-in wins over earlier ones), no unattended package activity
+  (a power cut mid-upgrade can break dpkg), boot partition read-only (to
+  update the kernel: `sudo mount -o remount,rw /boot/firmware`, upgrade,
+  reboot), automatic fsck at boot, 64 MB CMA. Lookout and g7-rig write their
+  data crash-safely (temp file, fsync, rename, fsync the directory).
+- **`readonly.sh enable`**: the whole card is mounted read-only under a RAM
+  overlay (overlayroot, about 214 MB on a Pi Zero W); everything written
+  while running goes to RAM and is gone after a power cut. The card itself
+  is at `/media/root-ro`, the RAM layer at `/media/root-rw`.
 
-   It runs after `g7-rig pair` / `import-key`, whenever one of those files
-   changes (`g7-persist.path`), and hourly (`g7-persist.timer`). The rest of
-   Lookout's storage (reading history etc.) is scratch: each boot starts
-   clean, and Nightscout keeps the history.
+**What `g7-rig persist` saves.** It unlocks the card, writes crash-safely
+and relocks it (verified):
 
-   `sudo deploy/readonly.sh status` shows the state. To update software:
-   `sudo deploy/readonly.sh disable --reboot`, update, then
-   `sudo deploy/readonly.sh enable --reboot`.
+- Lookout's sensor items: `id` (code), `sensorKey`, `sensorName`,
+  `pairRequest`, `keyRejected`, `sessionLengthSeconds`, `meterid`,
+  `pairedAt`
+- `/etc/lookout.env` and `/etc/g7-central`
+- the Bluetooth bond of the current sensor (the stored key's address); the
+  bonds of other `DXCM` sensors are removed from the card
+
+The rest of Lookout's storage (reading history etc.) is removed from the
+card: each boot starts clean, and Nightscout keeps the history. It runs
+after `g7-rig pair` / `import-key`, whenever one of those files changes
+(`g7-persist.path`), and at boot and hourly (`g7-persist.timer`).
+
+**Status and software changes:** `sudo deploy/readonly.sh status`. For
+changes `update-readonly.sh` does not cover:
+`sudo deploy/readonly.sh disable --reboot`, change, then
+`sudo deploy/readonly.sh enable --reboot`. One file on its own:
+`sudo deploy/readonly.sh install SRC DST [MODE [OWNER:GROUP]]` puts it on
+the running system and the card. To change a file on the card by hand:
+`sudo mount -o remount,rw /media/root-ro`, change it under `/media/root-ro`,
+`sudo mount -o remount,ro /media/root-ro`. Reading a file through `/` after
+changing it on the card underneath is undefined (overlayfs) unless the
+running system has its own copy, as `readonly.sh install` and
+`update-readonly.sh` arrange; otherwise reboot before relying on it.
+
+**Relocking and "the card is still writable".** A remount to read-only
+right after writing can say "mount point is busy" for a while, so every
+relock retries for up to 60 s. A file deleted on the card that the overlay
+still has cached (it was opened through the overlay) stays "unlinked but in
+use" on the card, and every remount to read-only then fails even though no
+process has it open. `sync; echo 2 > /proc/sys/vm/drop_caches` releases it;
+`g7-rig persist` and `update-readonly.sh` do that themselves after 5 failed
+tries (`readonly.sh install` only retries).
+By hand: [section 7](#the-card-will-not-relock).
+
+## 6. Memory, watchdogs and health
 
 ### Memory on a read-only card (found 2026-11-15)
 
@@ -140,79 +418,23 @@ RAM overlay of about 214 MB):
   nothing. `systemctl restart bluetooth` fixed it: the adapter kept the
   fleet address and heard 718 advertisements in 20 s.
 
-What the scripts do now:
+What the scripts do about it:
 
-- **Swap: no swap file.** `readonly.sh enable` and `readonly.sh units` (run by
+- **No swap file.** `readonly.sh enable` and `readonly.sh units` (run by
   `update-readonly.sh`) write `/etc/rpi/swap.conf.d/90-g7-readonly.conf`
-  when rpi-swap is installed. It said `Mechanism=zram` at first (no swap
-  file, zram only); since 2026-11-19 it says `Mechanism=none`, no swap at all
-  (see "A collector that stalled" below). The old swap file is deleted from the card
-  itself, never through the overlay: by `readonly.sh enable` (`/var/swap`,
-  while the card is still writable) and by `update-readonly.sh`
-  (`/media/root-ro/var/swap`, in its unlocked window, checked after
-  relocking). If a deleted file was cached by the overlay, the
-  card stays "unlinked but in use" and every relock fails with "mount point
-  is busy" ("the card is still writable"); `sync; echo 2 >
-  /proc/sys/vm/drop_caches` releases it, which `update-readonly.sh` and
-  `g7-rig persist` now do themselves. `update-readonly.sh` also copies the drop-in to the card.
-  `readonly.sh status` shows the mechanism and whether the card still has a
-  swap file. Takes effect at the next boot.
+  when rpi-swap is installed. It said `Mechanism=zram` at first; since
+  2026-11-19 it says `Mechanism=none` ([swap off](#swap-off)). The old swap
+  file is deleted from the card itself, never through the overlay: by
+  `readonly.sh enable` (`/var/swap`, while the card is still writable) and
+  by `update-readonly.sh` (`/media/root-ro/var/swap`, in its unlocked
+  window, checked after relocking). `readonly.sh status` shows the mechanism
+  and whether the card still has a swap file. Takes effect at the next boot.
 - **CMA: 64 MB.** `harden.sh` changes a line that is exactly
-  `dtoverlay=vc4-kms-v3d` to `dtoverlay=vc4-kms-v3d,cma-64` (the collectors
-  use no HDMI; the display is an SPI TFT). It leaves an overlay line with
-  parameters alone, keeps the old file once as
-  `/boot/firmware/config.txt.pre-harden`, and the boot partition read-only.
-  Takes effect at the next boot.
-- **Bluetooth watchdog.** `g7-bt-watchdog.timer` (installed and enabled by
-  `install.sh`, copied to the card by `update-readonly.sh`) runs
-  `g7-rig.js bt-watchdog` every 5 minutes at nice 19. When
-  `bluetooth.service` is active and the adapter is powered and discovering,
-  it counts "LE Advertising Report" / "LE Extended Advertising Report" lines
-  in 10 s of `btmon` (under `timeout`). After 3 empty samples in a row it
-  logs one line, runs `systemctl restart bluetooth` and then
-  `g7-central-apply` (if installed) for the fleet address. At most one
-  restart an hour; its state is in `/run/g7-rig/btwatch.json` (cleared at
-  reboot). A failed `btmon` does not count as an empty sample.
-
-Applying it to a collector that is already read-only: copy the checkout to
-the Pi, then `sudo deploy/update-readonly.sh`, `sudo deploy/harden.sh`,
-`sudo reboot`. The watchdog runs without a reboot; swap and CMA change at
-the reboot.
-
-Checking a device (after the reboot):
-
-```sh
-journalctl -u rpi-resize-swap-file.service --since -10min   # no truncate / "No space left" lines
-grep -E "CmaTotal|Shmem" /proc/meminfo                       # CmaTotal: 65536 kB
-sudo dmesg | grep -c "Out of memory"                         # 0 (this boot)
-swapon --show; sudo deploy/readonly.sh status                # no swap (was: zram only), no card swap file
-systemctl list-timers g7-bt-watchdog.timer
-journalctl -u g7-bt-watchdog.service --since -1h             # quiet unless it misses or restarts
-```
-
-The watchdog logs nothing while advertisements are heard, a line per empty
-sample (`... (1 of 3)`), and on acting: `bt-watchdog: adapter discovering
-but no advertisements heard in 3 samples of 10 s; restarting bluetooth`.
-
-Undoing each change (on a read-only card, files under `/media/root-ro` are
-changed with the card unlocked: `sudo mount -o remount,rw /media/root-ro`,
-change, `sudo mount -o remount,ro /media/root-ro`):
-
-- Swap: delete `/etc/rpi/swap.conf.d/90-g7-readonly.conf` (on a read-only
-  card: `/media/root-ro/etc/rpi/swap.conf.d/90-g7-readonly.conf`) and
-  reboot. rpi-swap then goes back to its default and creates a swap file
-  again, which on a read-only card brings the resize loop back.
-  `readonly.sh enable` / `units` (and so `update-readonly.sh`) write the
-  drop-in again.
-- CMA: `sudo mount -o remount,rw /boot/firmware`, change the line back to
-  `dtoverlay=vc4-kms-v3d` (or copy `config.txt.pre-harden` over
-  `config.txt`), `sudo mount -o remount,ro /boot/firmware`, reboot.
-  `harden.sh` changes it again if run.
-- Watchdog: `sudo systemctl disable --now g7-bt-watchdog.timer`; on a
-  read-only card also delete
-  `/media/root-ro/etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer`.
-  `install.sh` (and so `update-readonly.sh`) enables it again.
-- The alive watchdog: see "A collector that stalled" below.
+  `dtoverlay=vc4-kms-v3d` to `dtoverlay=vc4-kms-v3d,cma-64` (collectors use
+  no HDMI). It leaves an overlay line with parameters alone, keeps the old
+  file once as `/boot/firmware/config.txt.pre-harden`, and the boot
+  partition read-only. Takes effect at the next boot.
+- **The Bluetooth watchdog** ([below](#the-bluetooth-watchdog)).
 
 Verified here: the watchdog decision and command sequence (unit tests with a
 fake `exec`), the CMA edit on sample config files, `sh -n` of every script.
@@ -231,85 +453,63 @@ devices at the time), and the watchdog actually restarting Bluetooth on a deaf a
 
 ### A collector that stalled (2026-11-19)
 
-What happened: one collector was unresponsive for more than 31 hours, until
-it was power-cycled. The fleet UI's SSH polling connected each time but got
-no answer within 20 s. systemd's hardware watchdog (`RuntimeWatchdogSec=1min`)
-never fired, so the kernel and PID 1 were alive while the rest of userspace
-was stalled. Its logs were in RAM, so **the cause is unknown**. Two
-candidates: the SD card stopped answering reads, or memory thrash (a zram
-swap as large as RAM had been enabled a few days earlier, which lets a Pi
-grind instead of failing fast).
+One collector was unresponsive for more than 31 hours, until it was
+power-cycled. The fleet UI's SSH polling connected each time but got no
+answer within 20 s. systemd's hardware watchdog (`RuntimeWatchdogSec=1min`;
+not set by these scripts: `systemctl show -p RuntimeWatchdogUSec` shows
+it) never fired, so the kernel and PID 1 were alive while the rest of
+userspace was stalled. Its logs were in RAM, so **the cause is unknown**.
+Two candidates: the SD card stopped answering reads, or memory thrash (a
+zram swap as large as RAM had been enabled a few days earlier, which lets a
+Pi grind instead of failing fast). Three measures followed: `health` in
+`status`, the alive watchdog and swap off.
 
-Three measures:
+### The Bluetooth watchdog
 
-- **`health` in `g7-rig status`**, for the fleet UI to show and record:
+`g7-bt-watchdog.timer` (installed and enabled by `install.sh`) runs
+`g7-rig.js bt-watchdog` every 5 minutes at nice 19. When
+`bluetooth.service` is active and the adapter is powered and discovering,
+it counts "LE Advertising Report" / "LE Extended Advertising Report" lines
+in 10 s of `btmon` (under `timeout`). After 3 empty samples in a row it
+logs one line, runs `systemctl restart bluetooth` and then
+`g7-central-apply` (if installed) for the fleet address. At most one
+restart an hour; its state is in `/run/g7-rig/btwatch.json` (cleared at
+reboot). A failed `btmon` does not count as an empty sample. It logs
+nothing while advertisements are heard, a line per empty sample
+(`... (1 of 3)`), and on acting: `bt-watchdog: adapter discovering but no
+advertisements heard in 3 samples of 10 s; restarting bluetooth`.
 
-  ```json
-  "health": {"load1": 0.93, "mem_total_kb": 437312, "mem_available_kb": 262292,
-             "swap_total_kb": 0, "swap_used_kb": 0, "overlay_used_kb": 1640,
-             "overlay_total_kb": 219136, "throttled": "0x0"}
-  ```
+### The alive watchdog
 
-  `load1` from `/proc/loadavg`; memory and swap in kB from `/proc/meminfo`
-  (`swap_used_kb` = SwapTotal - SwapFree); `overlay_*` = kB used/total of the
-  RAM overlay at `/media/root-rw` (null when the card is not read-only);
-  `throttled` = what `vcgencmd get_throttled` prints (non-zero bits mean
-  under-voltage or throttling, now or since boot; null without vcgencmd).
-  Any field that cannot be read is null; status never fails because of it.
-  The only extra cost is one `vcgencmd` run and a statfs.
-- **The alive watchdog** (`g7-alive.service`, script
-  `/usr/local/sbin/g7-alive`, installed and enabled by `install.sh`, copied
-  to the card by `update-readonly.sh`). Every 30 s it runs a program
-  (`date`), reads one 4 KiB block straight from the card
-  (`dd if=/dev/mmcblk0 ... iflag=direct` under `timeout 60`, so the page
-  cache cannot answer for it; a different block in the first 16 MB each
-  time), and only if both worked tells systemd `WATCHDOG=1`. A read error
-  is logged as one line, a read with no answer as "no answer"; neither
-  notifies. With no notification for 5 minutes (`WatchdogSec=300`) systemd
-  kills the service (result `watchdog`) and `FailureAction=reboot-immediate`
-  reboots at once, without a clean shutdown: the card is read-only, so
-  nothing can be corrupted, and the RAM overlay is lost at any reboot. It
-  runs at `Nice=-5`, is shielded from the OOM killer, and does not depend on
-  Lookout or Bluetooth. The card device is the disk under `/media/root-ro`
-  (else under `/`); if it cannot be found, or cannot be read when the
-  service starts, it logs that once and checks only that programs start (so
-  a wrong device cannot cause a reboot loop). A clean stop
-  (`systemctl stop`/`restart`, shutdown) is not a failure; any other end of
-  the service (`kill -9`, a crash) reboots too. If PID 1 itself stalls, the
-  hardware watchdog still reboots.
-  - Turn it off: `sudo systemctl disable --now g7-alive.service`. On a
-    read-only card that lasts until the next boot; to keep it off, also
-    delete `/media/root-ro/etc/systemd/system/multi-user.target.wants/g7-alive.service`
-    with the card unlocked. `install.sh` (and so `update-readonly.sh`)
-    enables it again. If it ever reboots a healthy device, run
-    `sudo systemctl stop g7-alive` within 5 minutes of boot, then remove
-    that link.
-- **Swap off.** The rpi-swap drop-in now says `Mechanism=none` (no zram, no
-  swap file). About 255 MB is free in normal running, so swap buys little,
-  and without it a runaway process is killed by the OOM killer quickly
-  instead of the device grinding; the alive watchdog covers the rest. A
-  device with the earlier zram drop-in gets the new one from
-  `update-readonly.sh` (it runs `readonly.sh units`, which rewrites it, and
-  copies it to the card). Takes effect at the next boot.
+`g7-alive.service` (script `/usr/local/sbin/g7-alive`, installed and
+enabled by `install.sh`). Every 30 s it runs a program (`date`), reads one
+4 KiB block straight from the card (`dd if=/dev/mmcblk0 ... iflag=direct`
+under `timeout 60`, so the page cache cannot answer for it; a different
+block in the first 16 MB each time), and only if both worked tells systemd
+`WATCHDOG=1`. A read error is logged as one line, a read with no answer as
+"no answer"; neither notifies. With no notification for 5 minutes
+(`WatchdogSec=300`) systemd kills the service (result `watchdog`) and
+`FailureAction=reboot-immediate` reboots at once, without a clean shutdown:
+the card is read-only, so nothing can be corrupted, and the RAM overlay is
+lost at any reboot. It runs at `Nice=-5`, is shielded from the OOM killer,
+and does not depend on Lookout or Bluetooth. The card device is the disk
+under `/media/root-ro` (else under `/`); if it cannot be found, or cannot be
+read when the service starts, it logs that once and checks only that
+programs start (so a wrong device cannot cause a reboot loop). A clean stop
+(`systemctl stop`/`restart`, shutdown) is not a failure; any other end of
+the service (`kill -9`, a crash) reboots too. If PID 1 itself stalls, the
+hardware watchdog still reboots.
 
-Applying it to a read-only collector: copy the checkout to the Pi, then
-`sudo deploy/update-readonly.sh` (health and the alive watchdog work at
-once; the watchdog is restarted by `install.sh`), then `sudo reboot` (swap
-off).
+**Turning it off:** `sudo systemctl disable --now g7-alive.service`. On a
+read-only card that lasts until the next boot; to keep it off, also delete
+`/media/root-ro/etc/systemd/system/multi-user.target.wants/g7-alive.service`
+with the card unlocked. `install.sh` (and so `update-readonly.sh`) enables
+it again. If it ever reboots a healthy device, run
+`sudo systemctl stop g7-alive` within 5 minutes of boot, then remove that
+link.
 
-Checking a device:
-
-```sh
-sudo "$(command -v node)" /usr/local/sbin/g7-rig.js status   # "health": {...}, swap 0, throttled "0x0"
-systemctl status g7-alive                                    # active (running)
-journalctl -u g7-alive -b         # "card check: one direct read from /dev/mmcblk0 every 30 s"
-systemctl show g7-alive -p WatchdogTimestamp                 # at most 30 s old
-swapon --show; grep Swap /proc/meminfo                       # nothing; SwapTotal: 0 kB
-sudo deploy/readonly.sh status    # "swap: off (Mechanism=none)", "swap in use: none"
-```
-
-Testing the alive watchdog (watch `journalctl -u g7-alive -f` from a second
-SSH session; the journal is in RAM and gone after the reboot):
+**Testing it** (watch `journalctl -u g7-alive -f` from a second SSH session;
+the journal is in RAM and gone after the reboot):
 
 - Freeze it: `sudo kill -STOP "$(systemctl show -p MainPID --value g7-alive)"`.
   Nothing for 4.5 to 5 minutes, then `Watchdog timeout (limit 5min)!`,
@@ -320,6 +520,70 @@ SSH session; the journal is in RAM and gone after the reboot):
   `Deactivated successfully`; no reboot; `systemctl is-failed g7-alive` says
   `inactive`. `sudo systemctl start g7-alive` arms it again (so does a
   reboot).
+
+### Swap off
+
+The rpi-swap drop-in says `Mechanism=none` (no zram, no swap file). About
+255 MB is free in normal running, so swap buys little, and without it a
+runaway process is killed by the OOM killer quickly instead of the device
+grinding; the alive watchdog covers the rest. A device with the earlier
+zram drop-in gets the new one from `update-readonly.sh` (it runs
+`readonly.sh units`, which rewrites it, and copies it to the card). Takes
+effect at the next boot.
+
+### health in g7-rig status
+
+```json
+"health": {"load1": 0.93, "mem_total_kb": 437312, "mem_available_kb": 262292,
+           "swap_total_kb": 0, "swap_used_kb": 0, "overlay_used_kb": 1640,
+           "overlay_total_kb": 219136, "throttled": "0x0"}
+```
+
+`load1` from `/proc/loadavg`; memory and swap in kB from `/proc/meminfo`
+(`swap_used_kb` = SwapTotal - SwapFree); `overlay_*` = kB used/total of the
+RAM overlay at `/media/root-rw` (null when the card is not read-only);
+`throttled` = what `vcgencmd get_throttled` prints (non-zero bits mean
+under-voltage or throttling, now or since boot; null without vcgencmd).
+Any field that cannot be read is null; status never fails because of it.
+The only extra cost is one `vcgencmd` run and a statfs. The UI shows and
+logs it.
+
+### Checking a device
+
+```sh
+sudo /opt/node/bin/node /usr/local/sbin/g7-rig.js status   # "health": {...}, swap 0, throttled "0x0"
+grep -E "CmaTotal|Shmem" /proc/meminfo                     # CmaTotal: 65536 kB
+sudo dmesg | grep -c "Out of memory"                       # 0 (this boot)
+swapon --show; grep Swap /proc/meminfo                     # nothing; SwapTotal: 0 kB
+sudo deploy/readonly.sh status    # "swap: off (Mechanism=none)", "swap in use: none", "card swap file: none"
+journalctl -u rpi-resize-swap-file.service --since -10min  # no truncate / "No space left" lines
+systemctl status g7-alive                                  # active (running)
+journalctl -u g7-alive -b         # "card check: one direct read from /dev/mmcblk0 every 30 s"
+systemctl show g7-alive -p WatchdogTimestamp               # at most 30 s old
+systemctl list-timers g7-bt-watchdog.timer g7-persist.timer
+journalctl -u g7-bt-watchdog.service --since -1h           # quiet unless it misses or restarts
+```
+
+### Undoing each change
+
+On a read-only card, files under `/media/root-ro` are changed with the card
+unlocked ([section 5](#5-safe-to-unplug-the-read-only-card)).
+
+- Swap: delete `/etc/rpi/swap.conf.d/90-g7-readonly.conf` (on a read-only
+  card: `/media/root-ro/etc/rpi/swap.conf.d/90-g7-readonly.conf`) and
+  reboot. rpi-swap then goes back to its default and creates a swap file
+  again, which on a read-only card brings the resize loop back.
+  `readonly.sh enable` / `units` (and so `update-readonly.sh`) write the
+  drop-in again.
+- CMA: `sudo mount -o remount,rw /boot/firmware`, change the line back to
+  `dtoverlay=vc4-kms-v3d` (or copy `config.txt.pre-harden` over
+  `config.txt`), `sudo mount -o remount,ro /boot/firmware`, reboot.
+  `harden.sh` changes it again if run.
+- Bluetooth watchdog: `sudo systemctl disable --now g7-bt-watchdog.timer`;
+  on a read-only card also delete
+  `/media/root-ro/etc/systemd/system/timers.target.wants/g7-bt-watchdog.timer`.
+  `install.sh` (and so `update-readonly.sh`) enables it again.
+- Alive watchdog: [Turning it off](#the-alive-watchdog).
 
 Verified here: the health parsing and the status JSON (unit tests with real
 `/proc` text and a fake `exec`), the alive script's rounds with stubbed
@@ -340,10 +604,271 @@ overlay 1-8 of 214 MB, `throttled` 0x0). Not verified: a real stall of the SD ca
 userspace (only the frozen loop was tested), and whether this would have caught the
 2026-11-18 stall, whose cause is unknown.
 
-## Watching it
+## 7. Troubleshooting
+
+Logs are in RAM: `journalctl -b` covers this boot only, and a reboot
+(including one by `g7-alive`) loses them. Save what you need first, e.g.
+`journalctl -u lookout -b > /tmp/lookout.log` and copy it off.
+
+### No readings
 
 ```sh
+sudo /opt/node/bin/node /usr/local/sbin/g7-rig.js status
 journalctl -u lookout -f | grep -E 'got glucose|uploaded SGV|0a0300|Error'
 ```
 
-Start Lookout with `-v` in `LOOKOUT_ARGS` to add the low-level Bluetooth traces.
+- `lookout_active` false: `systemctl status lookout`, `journalctl -u lookout -b`.
+  Lookout rejects unknown options (`LOOKOUT_ARGS`).
+- `sensor.key_fingerprint` null and `pairing.state` `idle`: the collector
+  has no key and waits for one. The UI's sync copies it; or pair
+  ([section 4](#4-pairing-a-sensor)).
+- `pairing.state` `failed`, `rejected: check the code`: the sensor refused
+  the key (another pairing on the watch slot replaced it, or a wrong code).
+  Compare `key_fingerprint` and `paired_at` with the other collectors; the
+  UI copies the current key, or pair again.
+- `last_heard` old or null: the sensor is out of range, or Bluetooth hears
+  nothing ([below](#nothing-heard-on-bluetooth)).
+- `last_heard` recent but `last_reading` old: see the error lines;
+  readings can stall after authentication when the signal is weak
+  ([section 9](#9-known-limits-and-open-questions)).
+- Readings in the log but no `uploaded SGV`: in fleet mode a reading
+  another collector already sent is skipped, which is normal. Otherwise
+  check `NIGHTSCOUT_HOST` / `API_SECRET` in `/etc/lookout.env`.
+- `-v` in `LOOKOUT_ARGS` (then `sudo systemctl restart lookout`) adds
+  the low-level Bluetooth traces.
+
+### Busy or offline in the UI
+
+The UI tells two cases apart:
+
+- **busy**: `status` did not answer within the UI's timeout, but the
+  collector's SSH port accepts connections. The UI keeps its last status,
+  marked busy, and leaves it out of sync until it answers. A Pi Zero in the
+  middle of a failing read can be slow: this is not a frozen device.
+- **offline**: SSH fails, or times out and the SSH port does not answer.
+
+A timeout alone does not mean the device is frozen. Before power-cycling,
+try a normal SSH login (`ssh pi@collector-a`, give it a minute) and look:
+`uptime`, `systemctl --failed`, `free -m`, `df -h /media/root-rw`, the
+`health` checks in [section 6](#checking-a-device). Test the UI's own path
+from the UI device with `ssh -i <ui private key> g7rig@collector-a status`
+(prints `rejected` if the command is not one of the allowed forms). A
+device that is truly stalled is rebooted by `g7-alive` within about 5
+minutes, unless the alive watchdog is off; power-cycle only if a normal
+login also fails for longer than that.
+
+### Nothing heard on Bluetooth
+
+```sh
+bluetoothctl show | grep -E 'Controller|Powered|Discovering'   # Controller = the fleet address
+cat /etc/g7-central                                              # the shared address, if imported
+grep . /sys/class/rfkill/rfkill*/type /sys/class/rfkill/rfkill*/soft
+sudo timeout 12 btmon | grep -c "LE Advertising Report"          # 0 while discovering = deaf
+journalctl -u g7-bt-watchdog.service -b
+systemctl cat bluetooth | grep noplugin                          # --noplugin=gap
+```
+
+A deaf adapter: `sudo systemctl restart bluetooth`, then
+`sudo /usr/local/sbin/g7-central-apply` (sets the fleet address again; it
+says `Bluetooth address already ...` or `set to ...`). A controller address
+other than the shared one: the sensor refuses this collector's key; run
+`g7-central-apply` (`journalctl -u g7-central -b` shows the boot's attempt).
+Soft-blocked: [section 2, step 3](#2-setting-up-a-collector).
+
+### The card will not relock
+
+`ERROR: the card (/media/root-ro) is still writable` from a script, or
+`findmnt -no OPTIONS /media/root-ro` starting with `rw`:
+
+```sh
+sync; echo 2 | sudo tee /proc/sys/vm/drop_caches
+sudo mount -o remount,ro /media/root-ro
+findmnt -no OPTIONS /media/root-ro       # ro,...
+```
+
+The usual cause is a file deleted on the card that the overlay had cached
+([section 5](#5-safe-to-unplug-the-read-only-card)). A writable card is
+not dangerous at once, but a power cut while it is writable can corrupt it.
+
+### It reboots repeatedly
+
+- `uptime` and `journalctl -u g7-alive -b`: card read errors or "no answer"
+  lines before a reboot point at the card. Stop the alive watchdog within 5
+  minutes of boot if it reboots a healthy device
+  ([turning it off](#the-alive-watchdog)).
+- `grep -o -- '--no_reboot' /etc/lookout.env`: without it Lookout reboots
+  after repeated failed reads (`Too many read failures ... rebooting rig`
+  in the log).
+- `vcgencmd get_throttled` not `0x0`: under-voltage; use a better supply
+  or cable.
+- `sudo dmesg | grep -i "out of memory"` and `health`: memory; check that
+  swap is off and CMA is 64 MB ([section 6](#checking-a-device)).
+
+## 8. Testing another Lookout or xdrip-js build on a collector
+
+To try someone else's build (for example upstream Lookout or xdrip-js
+without this fork's fleet changes) on a read-only collector without
+touching the card. Everything below lives in RAM (`/run` and the RAM
+overlay), so a reboot or a power cut at any point brings the fleet setup
+back. Not yet done on a device as written; check each step's output.
+
+**Before you start.** The build must not be able to use the medical slot
+(slot 1, the pump's): check how it chooses the G7 display slot and its
+default, and set the watch slot explicitly. Lookout rejects options it does
+not know, so give it only the ones it has (a build without `--no_reboot`
+reboots the rig after repeated failed reads, which also ends the test). A
+pairing on the watch slot replaces the key there: the other collectors stop
+reading until they get the new key.
+
+1. **Stop the UI's key sync**, on the UI device:
+   `sudo systemctl stop dexcom-ui` (this stops the whole UI; it has no
+   separate switch). *Why:* the UI would see a different key on this
+   collector and `import-key` the fleet key over it, which restarts Lookout
+   and removes the new sensor's bond in the middle of your test.
+2. **Stop saving to the card**, on the collector:
+   `sudo systemctl stop g7-persist.path g7-persist.timer`. *Why:*
+   `g7-rig persist` saves the storage of whatever directory
+   `lookout.service` runs in; it would write the test's storage onto the
+   card and drop other sensors' bonds from it. They start again at the next
+   boot.
+3. **Copy the build** to a second directory, e.g. `~/test/Lookout` (and
+   `~/test/xdrip-js`), *without* `node_modules`: the RAM overlay is about
+   214 MB and Lookout's dependencies are far larger. Use the fleet
+   checkout's dependencies instead: for a Lookout-only change a link
+   `ln -s ~/src/Lookout/node_modules ~/test/Lookout/node_modules`; for an
+   xdrip-js build, `~/test/Lookout/node_modules/xdrip-js` linked to
+   `~/test/xdrip-js` and `NODE_PATH` (step 5) for the rest. Keep an eye on
+   `df -h /media/root-rw`.
+4. **Copy the storage**, with Lookout stopped so the copy is consistent:
+
+   ```sh
+   sudo systemctl stop lookout
+   cp -a ~/src/Lookout/storage ~/test/Lookout/storage
+   sudo install -m 600 /etc/lookout.env /run/lookout-test.env
+   sudoedit /run/lookout-test.env           # LOOKOUT_ARGS for the test build (watch slot)
+   ```
+
+   *Why:* the test starts from the same code and key, and the fleet storage
+   stays as it was, ready to go back to.
+5. **Point the unit at the test build** with a runtime-only drop-in
+   (`/run` is gone at the next boot, and nothing in `/etc` or on the card
+   changes):
+
+   ```sh
+   sudo mkdir -p /run/systemd/system/lookout.service.d
+   sudo tee /run/systemd/system/lookout.service.d/zz-test.conf >/dev/null <<'EOF'
+   [Service]
+   WorkingDirectory=/home/pi/test/Lookout
+   ExecStart=
+   ExecStart=/home/pi/test/Lookout/Lookout $LOOKOUT_ARGS
+   Environment=NODE_PATH=/home/pi/src/Lookout/node_modules
+   EnvironmentFile=/run/lookout-test.env
+   EOF
+   sudo systemctl daemon-reload
+   systemctl show lookout -p WorkingDirectory -p ExecStart    # the test build
+   sudo systemctl start lookout
+   journalctl -u lookout -f
+   ```
+
+   The second `EnvironmentFile=` is read after `/etc/lookout.env`, so its
+   `LOOKOUT_ARGS` wins; `NODE_PATH` is only a fallback after the test
+   build's own `node_modules`.
+6. **Test.** To pair, give the build the code its own way (for Lookout:
+   `~/src/Lookout/lookout.js id 1234`, which talks to the running Lookout).
+   The key it gets is bound to this collector's Bluetooth address, which is
+   the fleet's shared address, so the other collectors can use it too.
+7. **Keep the new key** (skip this to discard the test: go to step 8).
+   Stop Lookout, then copy the key into the fleet storage with node-persist,
+   as the Lookout user (so the files keep their owner):
+
+   ```sh
+   sudo systemctl stop lookout
+   cd ~/src/Lookout && /opt/node/bin/node -e '
+   const persist = require("node-persist");
+   const open = async (dir) => {
+     const s = persist.create({ dir, forgiveParseErrors: true, expiredInterval: false });
+     await s.init();
+     return s;
+   };
+   (async () => {
+     const [testDir, fleetDir] = process.argv.slice(1);
+     const test = await open(testDir);
+     const fleet = await open(fleetDir);
+     const k = await test.getItem("sensorKey");
+     if (!k || !k.key || !k.address) throw new Error("no sensorKey {key, address} in " + testDir);
+     await fleet.setItem("sensorKey", { key: k.key, address: k.address });
+     await fleet.setItem("pairedAt", (await test.getItem("pairedAt")) || Date.now());
+     const id = await test.getItem("id");
+     if (id) await fleet.setItem("id", id);
+     const name = await test.getItem("sensorName");
+     if (name) await fleet.setItem("sensorName", name); else await fleet.removeItem("sensorName");
+     await fleet.removeItem("pairRequest");
+     await fleet.removeItem("keyRejected");
+     console.log("moved the key for " + k.address);
+   })().catch((e) => { console.error(e.message); process.exit(1); });
+   ' ~/test/Lookout/storage ~/src/Lookout/storage
+   ```
+
+   *Why not `import-key`:* it removes the Bluetooth bond of the key's
+   sensor, which the test pairing just made. *Why `pairedAt`:* the UI
+   adopts a key paired after its own record and shares it; without a newer
+   `paired_at` it would overwrite this key with the old one.
+   This assumes the build stores `sensorKey` as `{key, address}` with
+   node-persist 2, as this fork does; check that the script printed the
+   address.
+8. **Restore the unit**, before saving: `g7-rig persist` saves the storage
+   of the directory the unit runs in, which must be the fleet's again.
+
+   ```sh
+   sudo systemctl stop lookout
+   sudo rm /run/systemd/system/lookout.service.d/zz-test.conf /run/lookout-test.env
+   sudo systemctl daemon-reload
+   systemctl show lookout -p WorkingDirectory              # ~/src/Lookout again
+   ```
+
+9. **Save to the card and start again** (after step 7):
+
+   ```sh
+   sudo /opt/node/bin/node /usr/local/sbin/g7-rig.js persist   # {"ok":true,"readOnly":true,"changed":N}
+   sudo systemctl start lookout g7-persist.path g7-persist.timer
+   sudo /opt/node/bin/node /usr/local/sbin/g7-rig.js status    # new key_fingerprint, paired_at, "paired"
+   ```
+
+   This writes the key items and the new sensor's bond to the card (and
+   removes other sensors' bonds from it). Without step 7, just start
+   `lookout`, `g7-persist.path` and `g7-persist.timer` (or reboot).
+10. **Copy the key to the other collectors**: start the UI again
+    (`sudo systemctl start dexcom-ui` on the UI device); it adopts the newer
+    pairing and copies it with `export-key` / `import-key` (removing their
+    old bonds there is what they need). By hand, from the UI device:
+    `ssh g7rig@collector-a export-key | ssh g7rig@collector-b import-key`.
+    Then remove `~/test` (or reboot: it is in RAM).
+
+## 9. Known limits and open questions
+
+- **Readings can stall after authentication** when the signal is weak.
+- **Two collectors in range at once** (same key, same Bluetooth address) is
+  not characterised: which one the sensor talks to, and whether they
+  disturb each other.
+- **The cause of the 2026-11-18 stall is unknown**
+  ([section 6](#a-collector-that-stalled-2026-11-19)); the alive watchdog
+  is a safety net, not a fix.
+- **Untested** for the fleet tools: G5 and G6 transmitters, and Debian 10
+  (buster) based rigs. Only Pi Zero W collectors on Raspberry Pi OS 13 have
+  run them.
+- **This fork is needed.** The fleet relies on changes that are not
+  upstream yet:
+  - xdrip-js (`g7-fixes`): the `allowPairing` option (authenticate with the
+    saved key only, never re-pair: what `--no_auto_pair` uses), the
+    `pairingBlocked` event when that stops a re-pair, re-authentication
+    within a connection (fresh challenge, same key), the advertised name in
+    `sawTransmitter` events, the display type in place of the alternate
+    Bluetooth channel, and the G7 pairing and transport fixes.
+  - Lookout (`g7-fixes`): `--no_auto_pair` (fleet mode), storing the name
+    and `pairedAt`, Nightscout de-duplication, `--no_reboot`,
+    `--display_type`, and `g7-rig` with these deploy scripts.
+
+  The intention is to move onto upstream Lookout and xdrip-js once their G7
+  branches are merged, keeping only what the fleet still needs.
+- `package-lock.json` pins an older xdrip-js commit than the fleet needs
+  ([section 2, step 5](#2-setting-up-a-collector)).
