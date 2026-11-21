@@ -146,7 +146,7 @@ Authentication subscription made before ExtraData.
 | `g7-bt-watchdog.service`, `g7-bt-watchdog.timer` (enabled) | `deploy/systemd/` | `install.sh` |
 | `/usr/local/sbin/g7-alive`, `g7-alive.service` (enabled) | `deploy/` | `install.sh` |
 | user `g7rig` (linger), its `authorized_keys`, `/etc/sudoers.d/g7rig` | | `setup-g7rig-access.sh` |
-| `/etc/systemd/journald.conf.d/zz-unplug-safe.conf`; apt-daily, apt-daily-upgrade, man-db timers and unattended-upgrades off; `/boot/firmware` read-only in `/etc/fstab`; `dtoverlay=vc4-kms-v3d,cma-64` | | `harden.sh` |
+| `/etc/systemd/journald.conf.d/zz-unplug-safe.conf`; apt-daily, apt-daily-upgrade, man-db timers and unattended-upgrades off; `/boot/firmware` read-only in `/etc/fstab`; `dtoverlay=vc4-kms-v3d,cma-64`; `/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf` (Wi-Fi power save off) | generated | `harden.sh` (`update-readonly.sh` copies the Wi-Fi drop-in to a read-only card) |
 | `g7-persist.service`, `g7-persist.timer`, `g7-persist.path` (enabled); `systemd-remount-fs.service.d/overlayroot.conf`; `/etc/rpi/swap.conf.d/90-g7-readonly.conf`; packages `overlayroot`, `rsync`; `overlayroot=tmpfs` in `/boot/firmware/cmdline.txt` | `deploy/systemd/`, generated | `readonly.sh enable` (`units` for the first three) |
 | `/etc/g7-central` | the key record | `g7-rig import-key` |
 
@@ -162,16 +162,27 @@ read-only (step 10) changes to the system last only until the next boot.
    Raspberry Pi Imager: set the host name, the user, Wi-Fi and your SSH key
    there. Its kernel command line already has `fsck.repair=yes` (`harden.sh`
    checks it); keep it.
-2. **Wi-Fi power save off.** On the devices it is off; no script does it.
-   With NetworkManager, per Wi-Fi connection:
+2. **Wi-Fi power save off.** With it on, the collectors' Wi-Fi dropped under
+   load. `harden.sh` (step 9) turns it off for every Wi-Fi connection,
+   present and future: it writes the NetworkManager drop-in
+   `/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf`
+   (`[connection]` / `wifi.powersave = 2`, i.e. disable), the default for
+   any connection that does not set power save itself. It does not restart
+   NetworkManager (that would cut an SSH session over Wi-Fi); it reloads its
+   configuration, and existing connections pick the default up when they
+   next reconnect or after a reboot. It prints the active Wi-Fi
+   connection's own setting. To check a connection, or to turn power save
+   off for one connection immediately (a connection that sets `enable`
+   itself is not changed by the drop-in):
 
    ```sh
    nmcli -t -f NAME,TYPE connection show            # the Wi-Fi connection's name
+   nmcli -g 802-11-wireless.powersave connection show "<connection>"   # disable, or default (= the drop-in)
    sudo nmcli connection modify "<connection>" 802-11-wireless.powersave disable
-   nmcli -g 802-11-wireless.powersave connection show "<connection>"   # disable
    ```
 
-   Active after the connection is next brought up (or a reboot).
+   A `modify` is active after the connection is next brought up (or a
+   reboot).
 3. **Bluetooth not blocked.** `rfkill` is not installed on Raspberry Pi OS
    Lite; read the state from `/sys` (`soft` and `hard` must be 0 for the
    `bluetooth` entry), and check that the adapter is powered:
@@ -244,7 +255,7 @@ read-only (step 10) changes to the system last only until the next boot.
    Then add the collector to the UI's configuration (see the UI project).
 9. **`sudo deploy/harden.sh`**: logs in RAM, no unattended apt/man-db
    activity, boot partition read-only, the `fsck.repair=yes` check, 64 MB
-   CMA ([section 5](#5-safe-to-unplug-the-read-only-card) and
+   CMA, Wi-Fi power save off (step 2) ([section 5](#5-safe-to-unplug-the-read-only-card) and
    [6](#6-memory-watchdogs-and-health)).
 10. **`sudo deploy/readonly.sh enable --reboot`**: the read-only card
     ([section 5](#5-safe-to-unplug-the-read-only-card)). It installs
@@ -260,6 +271,7 @@ What takes effect when:
 | `setup-g7rig-access.sh` | at once |
 | `harden.sh`: journald, apt timers, boot partition read-only | at once |
 | `harden.sh`: 64 MB CMA | next boot |
+| `harden.sh`: Wi-Fi power save off | when a connection next reconnects, or the next boot |
 | `readonly.sh enable` / `disable` | next boot |
 | swap drop-in (`readonly.sh enable` / `units`) | next boot |
 | `/etc/g7-central` | at once when `import-key` writes it; at every boot after |
@@ -297,7 +309,8 @@ the card has what was staged. Lookout's storage, the env file and
 for a swap change. Not covered: `node_modules` (to change dependencies:
 `readonly.sh disable --reboot`, `npm install`, `install.sh`,
 `readonly.sh enable --reboot`), the g7rig account, `harden.sh`'s changes
-under `/etc` and anything else outside its list; use the same
+under `/etc` other than the Wi-Fi power-save drop-in (which it copies to the
+card when the running system has it) and anything else outside its list; use the same
 disable/enable round for those. `harden.sh`'s CMA edit does work on a
 read-only card (the boot partition is not under the overlay; it takes
 effect at the next boot).
@@ -349,7 +362,7 @@ losing power at any moment.
   `zz-` drop-in wins over earlier ones), no unattended package activity
   (a power cut mid-upgrade can break dpkg), boot partition read-only (to
   update the kernel: `sudo mount -o remount,rw /boot/firmware`, upgrade,
-  reboot), automatic fsck at boot, 64 MB CMA. Lookout and g7-rig write their
+  reboot), automatic fsck at boot, 64 MB CMA, Wi-Fi power save off. Lookout and g7-rig write their
   data crash-safely (temp file, fsync, rename, fsync the directory).
 - **`readonly.sh enable`**: the whole card is mounted read-only under a RAM
   overlay (overlayroot, about 214 MB on a Pi Zero W); everything written
@@ -557,6 +570,7 @@ sudo dmesg | grep -c "Out of memory"                       # 0 (this boot)
 swapon --show; grep Swap /proc/meminfo                     # nothing; SwapTotal: 0 kB
 sudo deploy/readonly.sh status    # "swap: off (Mechanism=none)", "swap in use: none", "card swap file: none"
 journalctl -u rpi-resize-swap-file.service --since -10min  # no truncate / "No space left" lines
+cat /etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf # wifi.powersave = 2
 systemctl status g7-alive                                  # active (running)
 journalctl -u g7-alive -b         # "card check: one direct read from /dev/mmcblk0 every 30 s"
 systemctl show g7-alive -p WatchdogTimestamp               # at most 30 s old
@@ -575,6 +589,15 @@ unlocked ([section 5](#5-safe-to-unplug-the-read-only-card)).
   again, which on a read-only card brings the resize loop back.
   `readonly.sh enable` / `units` (and so `update-readonly.sh`) write the
   drop-in again.
+- Wi-Fi power save: delete
+  `/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf` (on a read-only
+  card also `/media/root-ro/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf`),
+  `sudo nmcli general reload conf`, and reconnect or reboot. Connections then
+  use NetworkManager's own default again. A connection set to `disable` by
+  hand keeps it (`nmcli connection modify "<connection>"
+  802-11-wireless.powersave default` to clear it). `harden.sh` writes the
+  drop-in again if run, and `update-readonly.sh` copies it to the card when
+  the running system has it.
 - CMA: `sudo mount -o remount,rw /boot/firmware`, change the line back to
   `dtoverlay=vc4-kms-v3d` (or copy `config.txt.pre-harden` over
   `config.txt`), `sudo mount -o remount,ro /boot/firmware`, reboot.

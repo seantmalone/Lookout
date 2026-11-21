@@ -5,6 +5,8 @@
 # It installs everything on the running system (install.sh), then unlocks the
 # card, mirrors Lookout's code and the installed files onto it, and relocks it
 # (verified). Lookout's storage and the env file are left to g7-rig persist.
+# harden.sh's Wi-Fi power-save drop-in (/etc/NetworkManager/conf.d/
+# 90-g7-wifi-powersave.conf) is mirrored too, when it is there.
 # With rpi-swap set to no swap (readonly.sh units rewrites the drop-in, also
 # over the earlier zram-only one), it also deletes the old swap file from the
 # card itself (/media/root-ro/var/swap), never through the overlay. The swap
@@ -68,6 +70,7 @@ PATHS="/usr/local/sbin/g7-rig.js /usr/local/sbin/g7-rig-remote
   /etc/systemd/system/g7-bt-watchdog.service /etc/systemd/system/g7-bt-watchdog.timer
   /usr/local/sbin/g7-alive /etc/systemd/system/g7-alive.service
   /etc/rpi/swap.conf.d/90-g7-readonly.conf
+  /etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf
   /etc/systemd/system/multi-user.target.wants/lookout.service
   /etc/systemd/system/multi-user.target.wants/g7-central.service
   /etc/systemd/system/multi-user.target.wants/g7-persist.path

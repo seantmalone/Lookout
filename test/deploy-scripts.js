@@ -73,6 +73,133 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('harden.sh: Wi-Fi power save off (NetworkManager drop-in)', () => {
+    const CONF = '/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf';
+    const fnText = () => {
+      const m = /^wifi_powersave_off\(\) \{\n[\s\S]*?\n\}$/m.exec(read('harden.sh'));
+      if (!m) throw new Error('no wifi_powersave_off() in harden.sh');
+      return m[0];
+    };
+
+    // run wifi_powersave_off against a scratch /etc/NetworkManager and a stub
+    // nmcli that logs its arguments (none when nmcli is null)
+    const run = ({ confD = true, existing = null, nmcli = '' } = {}) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7-wifi-'));
+      try {
+        if (confD) fs.mkdirSync(path.join(tmp, 'etc/NetworkManager/conf.d'), { recursive: true });
+        if (existing !== null) fs.writeFileSync(path.join(tmp, CONF), existing);
+        const bin = path.join(tmp, 'bin');
+        fs.mkdirSync(bin);
+        // only what the function needs besides nmcli
+        ['cat', 'chmod', 'cmp', 'mv', 'rm', 'sed', 'head'].forEach((c) => {
+          const which = spawnSync('/bin/sh', ['-c', `command -v ${c}`], { encoding: 'utf8' }).stdout.trim();
+          fs.symlinkSync(which, path.join(bin, c));
+        });
+        if (nmcli !== null) {
+          fs.writeFileSync(path.join(bin, 'nmcli'), `#!/bin/sh\necho "$*" >> "${tmp}/nmcli.log"\n${nmcli}\n`, { mode: 0o755 });
+        }
+        const text = fnText().split('/etc/NetworkManager/').join(`${tmp}/etc/NetworkManager/`);
+        const r = spawnSync('/bin/sh', ['-c', `${text}\nwifi_powersave_off`], {
+          encoding: 'utf8', env: { PATH: bin },
+        });
+        const conf = path.join(tmp, CONF);
+        const log = path.join(tmp, 'nmcli.log');
+        return {
+          status: r.status,
+          out: r.stdout + r.stderr,
+          conf: fs.existsSync(conf) ? fs.readFileSync(conf, 'utf8') : null,
+          mode: fs.existsSync(conf) ? (fs.statSync(conf).mode % 0o1000) : null,
+          calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n') : [],
+          left: fs.readdirSync(path.join(tmp, 'etc/NetworkManager/conf.d')),
+        };
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    const ACTIVE = [
+      '[ -n "$PS" ] || PS=disable',
+      'case "$*" in',
+      '  "-t -f TYPE,UUID connection show --active") printf "loopback:aaaa\\n802-11-wireless:1234-uuid\\n" ;;',
+      '  "-g 802-11-wireless.powersave connection show uuid 1234-uuid") echo "$PS" ;;',
+      'esac',
+    ].join('\n');
+
+    it('writes [connection] / wifi.powersave = 2 (disable), mode 644, and says why', () => {
+      const r = run({ nmcli: ACTIVE });
+      r.status.should.equal(0, r.out);
+      const lines = r.conf.split('\n').filter(Boolean);
+      lines.filter((l) => !l.startsWith('#')).should.eql(['[connection]', 'wifi.powersave = 2']);
+      lines.filter((l) => l.startsWith('#')).length.should.be.above(1);
+      r.mode.should.equal(0o644);
+      r.left.should.eql(['90-g7-wifi-powersave.conf']); // no .tmp left behind
+    });
+
+    it('reloads the configuration (never restarts NetworkManager) and reports the active connection', () => {
+      const r = run({ nmcli: ACTIVE });
+      r.calls[0].should.equal('general reload conf');
+      r.calls.should.containEql('-g 802-11-wireless.powersave connection show uuid 1234-uuid');
+      r.out.should.match(/next reconnect or after a reboot/);
+      r.out.should.match(/active connection: disable \(off\)/);
+      const code = fnText().split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+      code.should.not.match(/systemctl|service NetworkManager|nmcli [^\n]*(networking off|radio wifi off)/);
+      read('harden.sh').should.not.match(/^[^#]*(systemctl \S+ NetworkManager|restart NetworkManager)/m);
+    });
+
+    it('is idempotent: a second run leaves the same file and says so', () => {
+      const first = run({ nmcli: ACTIVE });
+      const second = run({ existing: first.conf, nmcli: ACTIVE });
+      second.conf.should.equal(first.conf);
+      second.out.should.match(/already off by default/);
+      second.left.should.eql(['90-g7-wifi-powersave.conf']);
+    });
+
+    it('replaces a file with other content', () => {
+      run({ existing: '[connection]\nwifi.powersave = 3\n', nmcli: ACTIVE }).conf
+        .should.match(/^wifi\.powersave = 2$/m);
+    });
+
+    it('flags a connection that turns power save on itself', () => {
+      run({ nmcli: `PS=enable\n${ACTIVE}` }).out
+        .should.match(/sets enable itself \(on\); to turn it off: nmcli connection modify uuid 1234-uuid 802-11-wireless\.powersave disable/);
+      run({ nmcli: `PS=default\n${ACTIVE}` }).out.should.match(/active connection: default/);
+    });
+
+    it('without an active Wi-Fi connection, or without nmcli, still writes the file', () => {
+      const none = run({ nmcli: 'exit 0' });
+      none.status.should.equal(0, none.out);
+      none.out.should.match(/no active Wi-Fi connection/);
+      none.conf.should.match(/^wifi\.powersave = 2$/m);
+      const noNmcli = run({ nmcli: null });
+      noNmcli.status.should.equal(0, noNmcli.out);
+      noNmcli.conf.should.match(/^wifi\.powersave = 2$/m);
+      noNmcli.out.should.match(/nmcli not found/);
+    });
+
+    it('does nothing without NetworkManager\'s conf.d', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7-wifi-'));
+      try {
+        const text = fnText().split('/etc/NetworkManager/').join(`${tmp}/etc/NetworkManager/`);
+        const r = spawnSync('/bin/sh', ['-c', `${text}\nwifi_powersave_off`], { encoding: 'utf8' });
+        r.status.should.equal(0, r.stderr);
+        r.stdout.should.match(/not found \(no NetworkManager\); left unchanged/);
+        fs.existsSync(path.join(tmp, 'etc')).should.equal(false);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('harden.sh runs it, and says on a read-only card that update-readonly.sh puts it on the card', () => {
+      const s = read('harden.sh');
+      s.should.match(/^wifi_powersave_off \|\| /m);
+      s.should.match(/update-readonly\.sh copies it onto the card/);
+    });
+
+    it('update-readonly.sh carries the drop-in to the card', () => {
+      mirroredPaths().should.containEql(CONF);
+    });
+  });
+
   describe('swap on a read-only card (rpi-swap: Mechanism=none, no swap at all)', () => {
     const DROPIN = '/etc/rpi/swap.conf.d/90-g7-readonly.conf';
     const readonly = () => read('readonly.sh');

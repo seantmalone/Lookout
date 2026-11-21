@@ -21,6 +21,16 @@
 #     kernel ran out and killed processes. Collectors use no HDMI. Only that
 #     exact line is changed (an overlay with parameters is left alone); the
 #     old file is kept once as config.txt.pre-harden. Active after a reboot.
+#  6. Wi-Fi power save off: with it on, Pi Zero W collectors lost Wi-Fi under
+#     load. A NetworkManager drop-in (/etc/NetworkManager/conf.d/
+#     90-g7-wifi-powersave.conf, wifi.powersave = 2, i.e. disable) sets the
+#     default for every Wi-Fi connection, present and future, that does not
+#     set power save itself. Only when NetworkManager's conf.d exists.
+#     NetworkManager is not restarted (that would cut an SSH session over
+#     Wi-Fi): its configuration is reloaded, and existing connections pick
+#     the default up when they next reconnect or after a reboot. On a
+#     read-only card the file lands in RAM only: deploy/update-readonly.sh
+#     copies it onto the card.
 #
 # Lookout and g7-rig already write their data crash-safely (temp file,
 # fsync, rename, fsync the directory), so after a power cut every item holds
@@ -118,3 +128,48 @@ elif grep -q '^dtoverlay=vc4-kms-v3d' /boot/firmware/config.txt; then
 else
   echo "config.txt: no vc4-kms-v3d overlay; CMA left unchanged"
 fi
+
+# 6. Wi-Fi power save off (NetworkManager default for every Wi-Fi connection)
+wifi_powersave_off() {
+  d=/etc/NetworkManager/conf.d
+  f=$d/90-g7-wifi-powersave.conf
+  [ -d "$d" ] || { echo "Wi-Fi power save: $d not found (no NetworkManager); left unchanged"; return 0; }
+  cat > "$f.tmp" <<'NM' || return 1
+# Wi-Fi power save off: with it on, collectors lost Wi-Fi under load
+# (deploy/harden.sh). The default for every Wi-Fi connection that does not set
+# 802-11-wireless.powersave itself. 2 = disable. Delete this file to go back
+# to NetworkManager's default.
+[connection]
+wifi.powersave = 2
+NM
+  chmod 644 "$f.tmp" || return 1
+  if cmp -s "$f.tmp" "$f"; then
+    rm -f "$f.tmp"
+    echo "Wi-Fi power save: already off by default ($f)"
+  else
+    mv -f "$f.tmp" "$f" || return 1
+    echo "Wi-Fi power save: off by default ($f)"
+  fi
+  command -v nmcli >/dev/null 2>&1 || { echo "Wi-Fi power save: nmcli not found; active after the next NetworkManager start (a reboot)"; return 0; }
+  # no restart: that would cut an SSH session over Wi-Fi
+  if nmcli general reload conf >/dev/null 2>&1; then
+    echo "Wi-Fi power save: NetworkManager configuration reloaded; existing connections pick it up when they next reconnect or after a reboot"
+  else
+    echo "Wi-Fi power save: could not reload NetworkManager's configuration; active after a reboot" >&2
+  fi
+  # the active Wi-Fi connection's own setting (default = the drop-in above)
+  uuid=$(nmcli -t -f TYPE,UUID connection show --active 2>/dev/null | sed -n 's/^802-11-wireless://p' | head -n 1)
+  [ -n "$uuid" ] || { echo "Wi-Fi power save: no active Wi-Fi connection"; return 0; }
+  cur=$(nmcli -g 802-11-wireless.powersave connection show uuid "$uuid" 2>/dev/null) || cur=""
+  case "$cur" in
+    disable) echo "Wi-Fi power save: active connection: disable (off)" ;;
+    default) echo "Wi-Fi power save: active connection: default (off with this drop-in once it reconnects)" ;;
+    enable)  echo "Wi-Fi power save: active connection sets enable itself (on); to turn it off: nmcli connection modify uuid $uuid 802-11-wireless.powersave disable" >&2 ;;
+    "")      echo "Wi-Fi power save: could not read the active connection's setting" ;;
+    *)       echo "Wi-Fi power save: active connection: $cur" ;;
+  esac
+}
+if [ "$(findmnt -no FSTYPE / 2>/dev/null)" = overlay ]; then
+  echo "Wi-Fi power save: the card is read-only; this change is in RAM until deploy/update-readonly.sh copies it onto the card"
+fi
+wifi_powersave_off || echo "Wi-Fi power save: could not write the NetworkManager drop-in" >&2
