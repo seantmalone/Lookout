@@ -498,6 +498,15 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('g7-central-apply (the watchdog runs it after a restart)', () => {
+    it('asks bluetoothctl only under a time limit', () => {
+      const code = read('g7-central-apply.sh').split('\n').filter((l) => !/^\s*#/.test(l));
+      const calls = code.filter((l) => /bluetoothctl/.test(l));
+      calls.length.should.be.above(0);
+      calls.forEach((l) => l.should.match(/timeout \d+ bluetoothctl/));
+    });
+  });
+
   describe('install.sh and Node under /opt/node', () => {
     it('warns when /opt/node/bin/node (what g7-rig-remote runs) is missing', () => {
       read('g7-rig-remote.sh').should.match(/NODE=\$\{G7RIG_NODE:-\/opt\/node\/bin\/node\}/);
@@ -542,10 +551,13 @@ describe('deploy scripts', () => {
       ]);
     });
 
-    it('runs the local-only g7-rig command at nice 19 every 5 minutes', () => {
+    it('runs the local-only g7-rig command at nice 10 every 5 minutes, with 6 min to finish', () => {
       const svc = fs.readFileSync(path.join(DEPLOY, 'systemd', 'g7-bt-watchdog.service'), 'utf8');
       svc.should.match(/^ExecStart=@NODE_BIN@\/node \/usr\/local\/sbin\/g7-rig\.js bt-watchdog$/m);
-      svc.should.match(/^Nice=19$/m);
+      // nice 19 / idle I/O starved it on a saturated Pi Zero: it is the recovery path
+      svc.should.match(/^Nice=10$/m);
+      svc.should.not.match(/^IOSchedulingClass=idle$/m);
+      svc.should.match(/^TimeoutStartSec=6min$/m); // test/g7rig-cli.js checks the helpers' limits fit
       const timer = fs.readFileSync(path.join(DEPLOY, 'systemd', 'g7-bt-watchdog.timer'), 'utf8');
       timer.should.match(/^OnUnitActiveSec=5min$/m);
       timer.should.match(/^WantedBy=timers\.target$/m);

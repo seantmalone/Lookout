@@ -8,7 +8,7 @@ FILE=${G7_CENTRAL_FILE:-/etc/g7-central}
 [ -f "$FILE" ] || exit 0
 mac=$(grep -v '^#' "$FILE" | grep -m1 -E '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$' | tr 'a-f' 'A-F' || true)
 [ -n "$mac" ] || { echo "no valid address in $FILE" >&2; exit 0; }
-current() { bluetoothctl show 2>/dev/null | sed -n 's/^Controller \([0-9A-F:]*\).*/\1/p' | head -1; }
+current() { timeout 10 bluetoothctl show 2>/dev/null | sed -n 's/^Controller \([0-9A-F:]*\).*/\1/p' | head -1; }
 # btmgmt hangs without a terminal (as under systemd): give it one, and a time limit
 bt() { timeout 20 script -qec "btmgmt $*" /dev/null >/dev/null 2>&1 || true; }
 i=0

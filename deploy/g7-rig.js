@@ -11,7 +11,7 @@
 //
 // Local only (systemd units on the collector; g7-rig-remote never passes them):
 //   g7-rig.js persist             copy what must survive onto the read-only card
-//   g7-rig.js bt-watchdog         restart Bluetooth if it is discovering but deaf
+//   g7-rig.js bt-watchdog         restart Bluetooth if it is deaf or bluetoothd does not answer
 //
 // Exit codes: 0 ok, 1 error, 2 rejected command, 3 refused (medical slot).
 // Test overrides: G7RIG_STORAGE (storage dir), G7RIG_ENV (env file), G7RIG_CACHE (cache dir).
@@ -228,8 +228,9 @@ const refuseMedical = (envText) => {
   }
 };
 
-const mustRun = async (io, cmd, args, what) => {
-  const r = await io.exec(cmd, args);
+const mustRun = async (io, cmd, args, what, opts) => {
+  const r = await io.exec(cmd, args, opts);
+  if (r.timedOut) throw fail(`${what} failed: no answer in ${Math.round(opts.timeoutMs / 1000)} s`);
   if (r.code !== 0) throw fail(`${what} failed: ${lastLine(r.stderr) || `exit ${r.code}`}`);
   return r;
 };
@@ -421,14 +422,34 @@ const writeWatchState = (file, state) => {
   fs.renameSync(`${file}.tmp`, file);
 };
 
-// Is the adapter discovering? (bluetooth.service active, powered, Discovering: yes)
-const btDiscovering = async (io) => {
-  const active = await io.exec('systemctl', ['is-active', 'bluetooth']);
-  if (active.code !== 0 || active.stdout.trim() !== 'active') return false;
-  const show = await io.exec('bluetoothctl', ['show'], { timeoutMs: 15000 });
-  if (show.code !== 0) return false;
+// Time limits for every helper the watchdog runs. g7-bt-watchdog.service's
+// TimeoutStartSec must stay well above the longest path: is-active, show,
+// busctl, btmon, restart, g7-central-apply (10 + 15 + 5 + 20 + 100 + 120 s =
+// 270 s, plus node's start; the unit allows 6 min). A test checks it.
+const WATCH_BT_SHOW_MS = 15000;
+const WATCH_BUSCTL_MS = 5000;
+const BT_RESTART_MS = 100000; // systemd's own stop timeout is 90 s
+const CENTRAL_APPLY_MS = 120000;
+
+// bluetooth.service active? Then the adapter (`bluetoothctl show`):
+// {answered (false: no answer in WATCH_BT_SHOW_MS), discovering}
+const btAdapter = async (io) => {
+  const active = await io.exec('systemctl', ['is-active', 'bluetooth'], { timeoutMs: SYSTEMCTL_MS });
+  if (active.code !== 0 || active.stdout.trim() !== 'active') return { active: false, answered: true, discovering: false };
+  const show = await io.exec('bluetoothctl', ['show'], { timeoutMs: WATCH_BT_SHOW_MS });
+  if (show.timedOut) return { active: true, answered: false, discovering: false };
+  if (show.code !== 0) return { active: true, answered: true, discovering: false };
   const a = btwatch.adapterState(show.stdout);
-  return a.powered && a.discovering;
+  return { active: true, answered: true, discovering: a.powered && a.discovering };
+};
+
+// How many device objects bluetoothd holds: a number, Infinity when it could
+// not list them within WATCH_BUSCTL_MS, null when busctl failed.
+const btDeviceCount = async (io) => {
+  const r = await io.exec('busctl', ['--system', '--list', 'tree', 'org.bluez'], { timeoutMs: WATCH_BUSCTL_MS });
+  if (r.timedOut) return Infinity;
+  if (r.code !== 0) return null;
+  return btwatch.countDevices(r.stdout);
 };
 
 // Advertising reports heard in SAMPLE_SECONDS of btmon, or null if btmon did
@@ -440,30 +461,46 @@ const sampleAdverts = async (io) => {
   return btwatch.countAdverts(mon.stdout);
 };
 
+const TEMPORARY_TIMEOUT_HINT = 'check TemporaryTimeout in /etc/bluetooth/main.conf';
+
 const btWatchdog = async (io) => {
   const file = path.join(cacheDir(io), 'btwatch.json');
   const prev = readWatchState(file);
-  const discovering = await btDiscovering(io);
-  const adverts = discovering ? await sampleAdverts(io) : null;
+  const minutesSince = (t) => Math.round((io.now() - t) / 60000);
+  const bt = await btAdapter(io);
+  // cheap and bounded, and only when bluetoothd answers
+  const devices = bt.active && bt.answered ? await btDeviceCount(io) : null;
+  const adverts = bt.discovering ? await sampleAdverts(io) : null;
   const d = btwatch.decide({
-    discovering, adverts, ...prev, now: io.now(),
+    answered: bt.answered, discovering: bt.discovering, adverts, ...prev, now: io.now(),
   });
+  const w = btwatch.deviceWarning({ devices, lastWarning: prev.lastWarning, now: io.now() });
   // saved before acting, so a failing restart is still limited to one an hour
-  writeWatchState(file, d.state);
+  writeWatchState(file, { ...d.state, ...w.state });
+  if (w.warn) {
+    io.stdout(devices === Infinity
+      ? `bt-watchdog: WARNING: bluetoothd could not list its devices in ${WATCH_BUSCTL_MS / 1000} s: ${TEMPORARY_TIMEOUT_HINT}\n`
+      : `bt-watchdog: WARNING: bluetoothd is tracking ${devices} devices: ${TEMPORARY_TIMEOUT_HINT}\n`);
+  }
   if (d.reason === 'miss') {
     io.stdout(`bt-watchdog: discovering but no advertisements heard in ${btwatch.SAMPLE_SECONDS} s (${d.state.misses} of ${btwatch.MISSES_TO_ACT})\n`);
   } else if (d.reason === 'rate-limited') {
-    const min = Math.round((io.now() - prev.lastRestart) / 60000);
-    io.stdout(`bt-watchdog: still no advertisements; not restarting again yet (last restart ${min} min ago, at most one per hour)\n`);
+    io.stdout(`bt-watchdog: still no advertisements; not restarting again yet (last restart ${minutesSince(prev.lastRestart)} min ago, at most one per hour)\n`);
+  } else if (d.reason === 'no-answer') {
+    io.stdout(`bt-watchdog: bluetoothd did not answer in ${WATCH_BT_SHOW_MS / 1000} s (${d.state.noAnswer} of ${btwatch.NO_ANSWER_TO_ACT})\n`);
+  } else if (d.reason === 'no-answer-rate-limited') {
+    io.stdout(`bt-watchdog: bluetoothd still not answering; not restarting again yet (last restart ${minutesSince(prev.lastRestart)} min ago, at most one per hour)\n`);
   }
   if (!d.act) return;
-  io.stdout(`bt-watchdog: adapter discovering but no advertisements heard in ${btwatch.MISSES_TO_ACT} samples of ${btwatch.SAMPLE_SECONDS} s; restarting bluetooth\n`);
-  await mustRun(io, 'systemctl', ['restart', 'bluetooth'], 'restarting bluetooth');
+  io.stdout(d.reason === 'unresponsive'
+    ? 'bt-watchdog: bluetoothd not answering: restarting bluetooth\n'
+    : `bt-watchdog: adapter discovering but no advertisements heard in ${btwatch.MISSES_TO_ACT} samples of ${btwatch.SAMPLE_SECONDS} s; restarting bluetooth\n`);
+  await mustRun(io, 'systemctl', ['restart', 'bluetooth'], 'restarting bluetooth', { timeoutMs: BT_RESTART_MS });
   // the fleet's shared address (g7-central-apply waits for the adapter itself)
   const apply = centralApplyPath(io);
   if (fs.existsSync(apply)) {
-    const r = await io.exec(apply, [], { timeoutMs: 120000 });
-    if (r.code !== 0) io.stderr(`bt-watchdog: g7-central-apply failed: ${lastLine(r.stderr) || `exit ${r.code}`}\n`);
+    const r = await io.exec(apply, [], { timeoutMs: CENTRAL_APPLY_MS });
+    if (r.code !== 0) io.stderr(`bt-watchdog: g7-central-apply failed: ${r.timedOut ? `no answer in ${CENTRAL_APPLY_MS / 1000} s` : lastLine(r.stderr) || `exit ${r.code}`}\n`);
   }
 };
 

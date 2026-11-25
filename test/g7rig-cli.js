@@ -472,6 +472,9 @@ describe('g7-rig CLI', () => {
       code: 0, stdout: 'Controller 00:00:00:00:00:01 (public)\n\tPowered: yes\n\tDiscovering: yes\n', stderr: '',
     };
     const sample = (stdout) => ({ code: 124, stdout, stderr: '' }); // timeout(1) ends btmon: exit 124
+    const NO_ANSWER = {
+      code: 124, stdout: '', stderr: '', timedOut: true,
+    }; // killed at its time limit
     let apply;
 
     const watchIo = (overrides = {}) => {
@@ -479,6 +482,7 @@ describe('g7-rig CLI', () => {
         'systemctl is-active bluetooth': { code: 0, stdout: 'active\n', stderr: '' },
         'bluetoothctl show': showDiscovering,
         'timeout 10 btmon': sample(''),
+        'busctl --system --list tree org.bluez': { code: 0, stdout: '/\n/org\n/org/bluez\n/org/bluez/hci0\n', stderr: '' },
         ...overrides,
       });
       io = makeIo('a', a.exec);
@@ -578,6 +582,140 @@ describe('g7-rig CLI', () => {
       err.should.match(/restarting bluetooth failed/);
       for (let i = 0; i < 3; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
       restarts(a).length.should.equal(1);
+    });
+
+    it('a run with no answer from bluetoothd: one line, nothing else run, no restart', async () => {
+      const a = watchIo({ 'bluetoothctl show': NO_ANSWER });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.should.equal('bt-watchdog: bluetoothd did not answer in 15 s (1 of 2)\n');
+      a.calls.find((c) => c.line === 'bluetoothctl show').opts.timeoutMs.should.equal(15000);
+      lines(a).filter((l) => /btmon|busctl/.test(l)).should.eql([]);
+      restarts(a).should.eql([]);
+    });
+
+    it('restarts Bluetooth when bluetoothd has not answered on 2 runs in a row, then re-applies the fleet address', async () => {
+      const a = watchIo({ 'bluetoothctl show': NO_ANSWER });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.should.equal('bt-watchdog: bluetoothd did not answer in 15 s (1 of 2)\n'
+        + 'bt-watchdog: bluetoothd not answering: restarting bluetooth\n');
+      const seq = lines(a);
+      const r = seq.indexOf('systemctl restart bluetooth');
+      r.should.be.above(-1);
+      seq.indexOf(apply).should.be.above(r);
+      restarts(a).length.should.equal(1);
+    });
+
+    it('an answer in between starts the count again', async () => {
+      const a = watchIo({ 'bluetoothctl show': NO_ANSWER });
+      await run(['bt-watchdog'], io);
+      const b = watchIo({ 'timeout 10 btmon': sample(ADVERTS) });
+      await run(['bt-watchdog'], io);
+      const c = watchIo({ 'bluetoothctl show': NO_ANSWER });
+      await run(['bt-watchdog'], io);
+      [a, b, c].forEach((x) => restarts(x).should.eql([]));
+      out.should.equal('bt-watchdog: bluetoothd did not answer in 15 s (1 of 2)\n');
+    });
+
+    it('no answer again within the hour after a restart: says so, does not restart again', async () => {
+      const a = watchIo({ 'bluetoothctl show': NO_ANSWER });
+      for (let i = 0; i < 4; i += 1) (await run(['bt-watchdog'], io)).should.equal(0, err); // eslint-disable-line no-await-in-loop
+      restarts(a).length.should.equal(1);
+      out.trim().split('\n').pop()
+        .should.equal('bt-watchdog: bluetoothd still not answering; not restarting again yet (last restart 0 min ago, at most one per hour)');
+      io.now = () => NOW + 61 * MIN;
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      restarts(a).length.should.equal(2);
+    });
+
+    it('the silent-discovery restart counts toward the same hourly limit', async () => {
+      const a = watchIo();
+      for (let i = 0; i < 3; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      restarts(a).length.should.equal(1);
+      const b = watchIo({ 'bluetoothctl show': NO_ANSWER });
+      for (let i = 0; i < 3; i += 1) await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+      restarts(b).should.eql([]);
+    });
+
+    it('a failed (not timed-out) bluetoothctl is not a missed answer', async () => {
+      const a = watchIo({ 'bluetoothctl show': { code: 1, stdout: '', stderr: 'No default controller available' } });
+      for (let i = 0; i < 4; i += 1) (await run(['bt-watchdog'], io)).should.equal(0, err); // eslint-disable-line no-await-in-loop
+      restarts(a).should.eql([]);
+      out.should.equal('');
+    });
+
+    const devicesTree = (n) => ({
+      code: 0,
+      stdout: ['/', '/org', '/org/bluez', '/org/bluez/hci0',
+        ...Array.from({ length: n }, (_, i) => `/org/bluez/hci0/dev_00_00_00_00_${String(Math.floor(i / 100)).padStart(2, '0')}_${String(i % 100).padStart(2, '0')}`),
+        '/org/bluez/hci0/dev_00_00_00_00_00_00/service0001', ''].join('\n'),
+      stderr: '',
+    });
+
+    it('counts the devices bluetoothd holds with busctl (5 s limit); quiet at 500 or fewer', async () => {
+      const a = watchIo({ 'busctl --system --list tree org.bluez': devicesTree(500) });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      a.calls.find((c) => c.line === 'busctl --system --list tree org.bluez').opts.timeoutMs.should.equal(5000);
+      out.should.equal('bt-watchdog: discovering but no advertisements heard in 10 s (1 of 3)\n');
+    });
+
+    it('more than 500 devices: one warning an hour, and no restart for that alone', async () => {
+      const a = watchIo({
+        'busctl --system --list tree org.bluez': devicesTree(1795),
+        'timeout 10 btmon': sample(ADVERTS),
+      });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.should.equal('bt-watchdog: WARNING: bluetoothd is tracking 1795 devices: check TemporaryTimeout in /etc/bluetooth/main.conf\n');
+      io.now = () => NOW + 61 * MIN;
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.split('\n').filter((l) => /WARNING/.test(l)).length.should.equal(2);
+      restarts(a).should.eql([]);
+    });
+
+    it('a device listing that times out is itself the warning', async () => {
+      const a = watchIo({
+        'busctl --system --list tree org.bluez': { ...NO_ANSWER },
+        'timeout 10 btmon': sample(ADVERTS),
+      });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.should.equal('bt-watchdog: WARNING: bluetoothd could not list its devices in 5 s: check TemporaryTimeout in /etc/bluetooth/main.conf\n');
+      restarts(a).should.eql([]);
+    });
+
+    it('busctl missing or failing: nothing said', async () => {
+      watchIo({
+        'busctl --system --list tree org.bluez': { code: 127, stdout: '', stderr: 'not found' },
+        'timeout 10 btmon': sample(ADVERTS),
+      });
+      (await run(['bt-watchdog'], io)).should.equal(0, err);
+      out.should.equal('');
+    });
+
+    // TimeoutStartSec of the unit, in ms
+    const unitStartLimit = () => {
+      const m = /^TimeoutStartSec=(\d+)min$/m.exec(fs.readFileSync(path.join(ROOT, 'deploy', 'systemd', 'g7-bt-watchdog.service'), 'utf8'));
+      return Number(m[1]) * 60 * 1000;
+    };
+
+    it('every helper it runs has a time limit, and on any path they add up to well under the unit\'s start limit', async () => {
+      // silent discovery: 3 runs, the third restarts; no answer: 2 runs, the second restarts
+      const paths = [[{}, 3], [{ 'bluetoothctl show': NO_ANSWER }, 2]];
+      // eslint-disable-next-line no-restricted-syntax
+      for (const [overrides, runs] of paths) {
+        const a = watchIo(overrides);
+        fs.rmSync(io.env.G7RIG_CACHE, { recursive: true, force: true }); // a fresh state
+        let before = 0;
+        for (let r = 0; r < runs; r += 1) {
+          before = a.calls.length;
+          await run(['bt-watchdog'], io); // eslint-disable-line no-await-in-loop
+        }
+        restarts(a).length.should.equal(1);
+        const last = a.calls.slice(before);
+        last.forEach((c) => (typeof c.opts.timeoutMs).should.equal('number', c.line));
+        const sum = last.reduce((t, c) => t + c.opts.timeoutMs, 0);
+        sum.should.be.belowOrEqual(unitStartLimit() - 60000); // a minute for node itself
+      }
     });
 
     it('is not reachable through the remote wrapper rules', async () => {

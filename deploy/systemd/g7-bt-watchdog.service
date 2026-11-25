@@ -1,16 +1,26 @@
 # Restart Bluetooth when the adapter says it is discovering but hears no
-# advertisements (g7-rig bt-watchdog; the decision is lib/g7rig/btwatch.js).
+# advertisements, or when bluetoothd stops answering (g7-rig bt-watchdog;
+# the decision is lib/g7rig/btwatch.js).
 # Seen after kernel out-of-memory kills on a Pi Zero W: BlueZ reported
 # "Discovering: yes" while btmon showed no advertising reports for six hours,
-# until bluetooth was restarted. Installed by deploy/install.sh, which fills
-# in @NODE_BIN@; run every 5 minutes by g7-bt-watchdog.timer.
+# until bluetooth was restarted. And with TemporaryTimeout = 0 in
+# /etc/bluetooth/main.conf: bluetoothd held 1,795 devices and took more than
+# 90 s to answer `bluetoothctl show`. Installed by deploy/install.sh, which
+# fills in @NODE_BIN@; run every 5 minutes by g7-bt-watchdog.timer.
+#
+# Every helper the command runs has its own time limit; the longest path
+# (a restart plus g7-central-apply) adds up to 270 s, so TimeoutStartSec
+# leaves 90 s for node itself. Nice=10 rather than 19: this is the recovery
+# path for a busy bluetoothd, and at nice 19 on a saturated single core node
+# barely starts (the unit used to hit its start limit then).
 [Unit]
-Description=Restart Bluetooth if it is discovering but hears nothing (g7-rig bt-watchdog)
+Description=Restart Bluetooth if it hears nothing or bluetoothd does not answer (g7-rig bt-watchdog)
 After=bluetooth.service
 
 [Service]
 Type=oneshot
 ExecStart=@NODE_BIN@/node /usr/local/sbin/g7-rig.js bt-watchdog
-Nice=19
-IOSchedulingClass=idle
-TimeoutStartSec=3min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=6min

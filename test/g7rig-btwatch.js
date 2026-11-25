@@ -12,22 +12,22 @@ describe('g7-rig bt-watchdog decision (lib/g7rig/btwatch)', () => {
   it('does nothing and forgets misses when the adapter is not discovering', () => {
     decide({
       discovering: false, adverts: 0, misses: 2, lastRestart: null, now: NOW,
-    }).should.eql({ act: false, reason: 'not-discovering', state: { misses: 0, lastRestart: null } });
+    }).should.eql({ act: false, reason: 'not-discovering', state: { misses: 0, noAnswer: 0, lastRestart: null } });
   });
 
   it('forgets misses as soon as anything is heard', () => {
     decide({
       discovering: true, adverts: 5, misses: 2, lastRestart: NOW - HOUR, now: NOW,
-    }).should.eql({ act: false, reason: 'heard', state: { misses: 0, lastRestart: NOW - HOUR } });
+    }).should.eql({ act: false, reason: 'heard', state: { misses: 0, noAnswer: 0, lastRestart: NOW - HOUR } });
   });
 
   it('counts empty samples while discovering, without acting before the third', () => {
-    let state = { misses: 0, lastRestart: null };
+    let state = { misses: 0, noAnswer: 0, lastRestart: null };
     [1, 2].forEach((n) => {
       const d = decide({
         discovering: true, adverts: 0, ...state, now: NOW,
       });
-      d.should.eql({ act: false, reason: 'miss', state: { misses: n, lastRestart: null } });
+      d.should.eql({ act: false, reason: 'miss', state: { misses: n, noAnswer: 0, lastRestart: null } });
       state = d.state;
     });
   });
@@ -35,16 +35,16 @@ describe('g7-rig bt-watchdog decision (lib/g7rig/btwatch)', () => {
   it('acts on the third consecutive empty sample and records the restart', () => {
     decide({
       discovering: true, adverts: 0, misses: 2, lastRestart: null, now: NOW,
-    }).should.eql({ act: true, reason: 'deaf', state: { misses: 0, lastRestart: NOW } });
+    }).should.eql({ act: true, reason: 'deaf', state: { misses: 0, noAnswer: 0, lastRestart: NOW } });
   });
 
   it('restarts at most once an hour', () => {
     decide({
       discovering: true, adverts: 0, misses: 2, lastRestart: NOW - HOUR + 1000, now: NOW,
-    }).should.eql({ act: false, reason: 'rate-limited', state: { misses: 3, lastRestart: NOW - HOUR + 1000 } });
+    }).should.eql({ act: false, reason: 'rate-limited', state: { misses: 3, noAnswer: 0, lastRestart: NOW - HOUR + 1000 } });
     decide({
       discovering: true, adverts: 0, misses: 5, lastRestart: NOW - HOUR, now: NOW,
-    }).should.eql({ act: true, reason: 'deaf', state: { misses: 0, lastRestart: NOW } });
+    }).should.eql({ act: true, reason: 'deaf', state: { misses: 0, noAnswer: 0, lastRestart: NOW } });
   });
 
   it('is not stuck if the clock went backwards since the last restart', () => {
@@ -56,25 +56,153 @@ describe('g7-rig bt-watchdog decision (lib/g7rig/btwatch)', () => {
   it('leaves the state alone when no sample could be taken (btmon missing or failed)', () => {
     decide({
       discovering: true, adverts: null, misses: 2, lastRestart: null, now: NOW,
-    }).should.eql({ act: false, reason: 'no-sample', state: { misses: 2, lastRestart: null } });
+    }).should.eql({ act: false, reason: 'no-sample', state: { misses: 2, noAnswer: 0, lastRestart: null } });
   });
 
   it('treats missing or bad previous state as a clean start', () => {
     decide({ discovering: true, adverts: 0, now: NOW })
-      .should.eql({ act: false, reason: 'miss', state: { misses: 1, lastRestart: null } });
+      .should.eql({ act: false, reason: 'miss', state: { misses: 1, noAnswer: 0, lastRestart: null } });
     decide({
       discovering: true, adverts: 0, misses: 'x', lastRestart: 'y', now: NOW,
-    }).should.eql({ act: false, reason: 'miss', state: { misses: 1, lastRestart: null } });
+    }).should.eql({ act: false, reason: 'miss', state: { misses: 1, noAnswer: 0, lastRestart: null } });
+  });
+
+  describe('bluetoothd does not answer (bluetoothctl show timed out)', () => {
+    it('counts the first run without an answer, keeping the silent-discovery count as it was', () => {
+      decide({
+        answered: false,
+        discovering: false,
+        adverts: null,
+        misses: 1,
+        noAnswer: 0,
+        lastRestart: null,
+        now: NOW,
+      }).should.eql({ act: false, reason: 'no-answer', state: { misses: 1, noAnswer: 1, lastRestart: null } });
+    });
+
+    it('restarts on the second consecutive run without an answer', () => {
+      decide({
+        answered: false,
+        discovering: false,
+        adverts: null,
+        misses: 0,
+        noAnswer: 1,
+        lastRestart: null,
+        now: NOW,
+      }).should.eql({ act: true, reason: 'unresponsive', state: { misses: 0, noAnswer: 0, lastRestart: NOW } });
+    });
+
+    it('an answer in between starts the count again', () => {
+      decide({
+        answered: true,
+        discovering: false,
+        adverts: null,
+        misses: 0,
+        noAnswer: 1,
+        lastRestart: null,
+        now: NOW,
+      }).state.noAnswer.should.equal(0);
+      decide({
+        answered: true,
+        discovering: true,
+        adverts: 3,
+        misses: 0,
+        noAnswer: 1,
+        lastRestart: null,
+        now: NOW,
+      }).should.eql({ act: false, reason: 'heard', state: { misses: 0, noAnswer: 0, lastRestart: null } });
+    });
+
+    it('shares the once-an-hour limit with the silent-discovery restart', () => {
+      decide({
+        answered: false, misses: 0, noAnswer: 1, lastRestart: NOW - HOUR + 1000, now: NOW,
+      }).should.eql({
+        act: false, reason: 'no-answer-rate-limited', state: { misses: 0, noAnswer: 2, lastRestart: NOW - HOUR + 1000 },
+      });
+      decide({
+        answered: false, misses: 0, noAnswer: 4, lastRestart: NOW - HOUR, now: NOW,
+      }).act.should.equal(true);
+      // clock went backwards: not locked out
+      decide({
+        answered: false, misses: 0, noAnswer: 1, lastRestart: NOW + HOUR, now: NOW,
+      }).act.should.equal(true);
+    });
+
+    it('answered missing (older callers) means it answered', () => {
+      decide({
+        discovering: true, adverts: 0, misses: 2, noAnswer: 1, lastRestart: null, now: NOW,
+      }).should.eql({ act: true, reason: 'deaf', state: { misses: 0, noAnswer: 0, lastRestart: NOW } });
+    });
+  });
+
+  describe('deviceWarning (how many devices bluetoothd holds)', () => {
+    const { deviceWarning } = btwatch;
+
+    it('says nothing at or below 500 devices', () => {
+      deviceWarning({ devices: 500, lastWarning: null, now: NOW })
+        .should.eql({ warn: false, state: { lastWarning: null } });
+      deviceWarning({ devices: 0, lastWarning: NOW - 2 * HOUR, now: NOW })
+        .should.eql({ warn: false, state: { lastWarning: NOW - 2 * HOUR } });
+    });
+
+    it('warns above 500, at most once an hour', () => {
+      deviceWarning({ devices: 501, lastWarning: null, now: NOW })
+        .should.eql({ warn: true, state: { lastWarning: NOW } });
+      deviceWarning({ devices: 1795, lastWarning: NOW - HOUR + 1000, now: NOW })
+        .should.eql({ warn: false, state: { lastWarning: NOW - HOUR + 1000 } });
+      deviceWarning({ devices: 1795, lastWarning: NOW - HOUR, now: NOW }).warn.should.equal(true);
+      // the clock went back
+      deviceWarning({ devices: 1795, lastWarning: NOW + HOUR, now: NOW }).warn.should.equal(true);
+    });
+
+    it('a listing that timed out (devices: Infinity) warns too; an unknown count (null) does not', () => {
+      deviceWarning({ devices: Infinity, lastWarning: null, now: NOW }).warn.should.equal(true);
+      deviceWarning({ devices: null, lastWarning: null, now: NOW }).warn.should.equal(false);
+    });
+  });
+
+  describe('countDevices (busctl --list tree org.bluez)', () => {
+    it('counts device objects, not their services or the adapter', () => {
+      const text = [
+        '/',
+        '/org',
+        '/org/bluez',
+        '/org/bluez/hci0',
+        '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF',
+        '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/service000a',
+        '/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/service000a/char000b',
+        '/org/bluez/hci0/dev_11_22_33_44_55_66',
+        '/org/bluez/hci0/dev_4A_9F_00_01_02_03',
+      ].join('\n');
+      btwatch.countDevices(text).should.equal(3);
+    });
+    it('also reads the tree drawing', () => {
+      btwatch.countDevices('└─ /org\n  └─ /org/bluez/hci0\n    ├─ /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF\n'
+        + '    │ └─ /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/service0001\n    └─ /org/bluez/hci0/dev_11_22_33_44_55_66\n')
+        .should.equal(2);
+      btwatch.countDevices('').should.equal(0);
+    });
   });
 
   describe('parseState', () => {
     it('reads what the command wrote', () => {
+      btwatch.parseState(JSON.stringify({
+        misses: 2, noAnswer: 1, lastRestart: NOW, lastWarning: NOW - HOUR,
+      })).should.eql({
+        misses: 2, noAnswer: 1, lastRestart: NOW, lastWarning: NOW - HOUR,
+      });
+    });
+    it('reads a state file from before (no noAnswer, no lastWarning)', () => {
       btwatch.parseState(JSON.stringify({ misses: 2, lastRestart: NOW }))
-        .should.eql({ misses: 2, lastRestart: NOW });
+        .should.eql({
+          misses: 2, noAnswer: 0, lastRestart: NOW, lastWarning: null,
+        });
     });
     it('falls back to a clean state', () => {
-      [null, '', 'not json', '[]', '{"misses":-1,"lastRestart":"x"}'].forEach((t) => {
-        btwatch.parseState(t).should.eql({ misses: 0, lastRestart: null });
+      [null, '', 'not json', '[]', '{"misses":-1,"noAnswer":"x","lastRestart":"x"}'].forEach((t) => {
+        btwatch.parseState(t).should.eql({
+          misses: 0, noAnswer: 0, lastRestart: null, lastWarning: null,
+        });
       });
     });
   });
