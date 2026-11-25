@@ -147,7 +147,7 @@ Authentication subscription made before ExtraData.
 | `/usr/local/sbin/g7-alive`, `g7-alive.service` (enabled) | `deploy/` | `install.sh` |
 | `/usr/local/sbin/g7-netwatch`, `g7-netwatch.service`, `g7-netwatch.timer` (enabled) | `deploy/` | `install.sh` |
 | user `g7rig` (linger), its `authorized_keys`, `/etc/sudoers.d/g7rig` | | `setup-g7rig-access.sh` |
-| `/etc/systemd/journald.conf.d/zz-unplug-safe.conf`; apt-daily, apt-daily-upgrade, man-db timers and unattended-upgrades off; `/boot/firmware` read-only in `/etc/fstab`; `dtoverlay=vc4-kms-v3d,cma-64`; `/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf` (Wi-Fi power save off) | generated | `harden.sh` (`update-readonly.sh` copies the Wi-Fi drop-in to a read-only card) |
+| `/etc/systemd/journald.conf.d/zz-unplug-safe.conf`; apt-daily, apt-daily-upgrade, man-db timers and unattended-upgrades off; `/boot/firmware` read-only in `/etc/fstab`; `dtoverlay=vc4-kms-v3d,cma-64`; `/etc/NetworkManager/conf.d/90-g7-wifi-powersave.conf` (Wi-Fi power save off); an active `TemporaryTimeout = 0` in `/etc/bluetooth/main.conf` back to the shipped `#TemporaryTimeout = 30` | generated / edited | `harden.sh` (`update-readonly.sh` copies the Wi-Fi drop-in to a read-only card and applies the same `main.conf` correction to the card's copy) |
 | `g7-persist.service`, `g7-persist.timer`, `g7-persist.path` (enabled); `systemd-remount-fs.service.d/overlayroot.conf`; `/etc/rpi/swap.conf.d/90-g7-readonly.conf`; packages `overlayroot`, `rsync`; `overlayroot=tmpfs` in `/boot/firmware/cmdline.txt` | `deploy/systemd/`, generated | `readonly.sh enable` (`units` for the first three) |
 | `/etc/g7-central` | the key record | `g7-rig import-key` |
 
@@ -200,6 +200,14 @@ read-only (step 10) changes to the system last only until the next boot.
    To unblock: `echo 0 | sudo tee /sys/class/rfkill/rfkillN/soft` (N from
    the listing). systemd-rfkill restores the saved state at each boot, which
    on a read-only card is the one saved on the card: unblock before step 10.
+
+   Leave `TemporaryTimeout` in `/etc/bluetooth/main.conf` at BlueZ's
+   default (the shipped, commented `#TemporaryTimeout = 30`). With 0,
+   bluetoothd never forgets a device it saw while discovering, and after a
+   few days it is too slow to answer
+   ([section 6](#a-collector-that-stopped-answering-2026-11-24)).
+   `harden.sh` (step 9) puts an active 0 back to the default and reports
+   any other value.
 4. **Node 22 in `/opt/node`.** The devices run Node v22.23.4 there;
    `g7-rig-remote` and the units expect `/opt/node/bin/node`. The Pi Zero W
    is ARMv6, for which nodejs.org has no official builds; the unofficial
@@ -268,7 +276,11 @@ read-only (step 10) changes to the system last only until the next boot.
    Then add the collector to the UI's configuration (see the UI project).
 9. **`sudo deploy/harden.sh`**: logs in RAM, no unattended apt/man-db
    activity, boot partition read-only, the `fsck.repair=yes` check, 64 MB
-   CMA, Wi-Fi power save off (step 2) ([section 5](#5-safe-to-unplug-the-read-only-card) and
+   CMA, Wi-Fi power save off (step 2), and BlueZ's `TemporaryTimeout`
+   (step 3: an active `TemporaryTimeout = 0` line in
+   `/etc/bluetooth/main.conf` becomes the shipped `#TemporaryTimeout = 30`;
+   it prints the value either way and does not restart Bluetooth)
+   ([section 5](#5-safe-to-unplug-the-read-only-card) and
    [6](#6-memory-watchdogs-and-health)).
 10. **`sudo deploy/readonly.sh enable --reboot`**: the read-only card
     ([section 5](#5-safe-to-unplug-the-read-only-card)). It installs
@@ -285,6 +297,7 @@ What takes effect when:
 | `harden.sh`: journald, apt timers, boot partition read-only | at once |
 | `harden.sh`: 64 MB CMA | next boot |
 | `harden.sh`: Wi-Fi power save off | when a connection next reconnects, or the next boot |
+| `harden.sh`: `TemporaryTimeout` back to the default | after `sudo systemctl restart bluetooth`, or the next boot |
 | `readonly.sh enable` / `disable` | next boot |
 | swap drop-in (`readonly.sh enable` / `units`) | next boot |
 | `/etc/g7-central` | at once when `import-key` writes it; at every boot after |
@@ -323,7 +336,12 @@ for a swap change. Not covered: `node_modules` (to change dependencies:
 `readonly.sh disable --reboot`, `npm install`, `install.sh`,
 `readonly.sh enable --reboot`), the g7rig account, `harden.sh`'s changes
 under `/etc` other than the Wi-Fi power-save drop-in (which it copies to the
-card when the running system has it) and anything else outside its list; use the same
+card when the running system has it) and the `TemporaryTimeout` correction
+(when the card's `/etc/bluetooth/main.conf` still has an active
+`TemporaryTimeout = 0` and `harden.sh` has corrected the running system, it
+applies the same one-line change to the card's own copy, in the unlocked
+window, and checks it after relocking; the file is not mirrored as a whole),
+and anything else outside its list; use the same
 disable/enable round for those. `harden.sh`'s CMA edit does work on a
 read-only card (the boot partition is not under the overlay; it takes
 effect at the next boot).
@@ -375,7 +393,8 @@ losing power at any moment.
   `zz-` drop-in wins over earlier ones), no unattended package activity
   (a power cut mid-upgrade can break dpkg), boot partition read-only (to
   update the kernel: `sudo mount -o remount,rw /boot/firmware`, upgrade,
-  reboot), automatic fsck at boot, 64 MB CMA, Wi-Fi power save off. Lookout and g7-rig write their
+  reboot), automatic fsck at boot, 64 MB CMA, Wi-Fi power save off, BlueZ's
+  `TemporaryTimeout` at its default. Lookout and g7-rig write their
   data crash-safely (temp file, fsync, rename, fsync the directory).
 - **`readonly.sh enable`**: the whole card is mounted read-only under a RAM
   overlay (overlayroot, about 214 MB on a Pi Zero W); everything written
@@ -484,26 +503,145 @@ power-cycled. The fleet UI's SSH polling connected each time but got no
 answer within 20 s. systemd's hardware watchdog (`RuntimeWatchdogSec=1min`;
 not set by these scripts: `systemctl show -p RuntimeWatchdogUSec` shows
 it) never fired, so the kernel and PID 1 were alive while the rest of
-userspace was stalled. Its logs were in RAM, so **the cause is unknown**.
-Two candidates: the SD card stopped answering reads, or memory thrash (a
-zram swap as large as RAM had been enabled a few days earlier, which lets a
-Pi grind instead of failing fast). Three measures followed: `health` in
-`status`, the alive watchdog and swap off.
+userspace was stalled. Its logs were in RAM, so the cause could not be
+established at the time. Two candidates then: the SD card stopped answering
+reads, or memory thrash (a zram swap as large as RAM had been enabled a few
+days earlier, which lets a Pi grind instead of failing fast). Three
+measures followed: `health` in `status`, the alive watchdog and swap off.
+
+**Very probable cause, found five days later** ([below](#a-collector-that-stopped-answering-2026-11-24)):
+the same collector had `TemporaryTimeout = 0` in `/etc/bluetooth/main.conf`,
+so bluetoothd's device list grew without bound and `bluetoothctl show`,
+which `status` ran without its own time limit, took longer than the UI
+waited: the UI saw no answer, while the device itself was alive. This is
+probable, not proven: that day's logs were in RAM and were lost at the
+power cycle. It fits what was seen (SSH connected, no answer to `status`
+in 20 s, no watchdog fired), and the setting was a leftover from early
+experiments, so it was very probably already there.
+
+### A collector that stopped answering (2026-11-24)
+
+One collector (Pi Zero W, Raspberry Pi OS 13, BlueZ 5.82, read-only card)
+showed as busy in the UI for 45 hours and took no reading of its own in
+that time. Measured on the device:
+
+- `/etc/bluetooth/main.conf` had an active `TemporaryTimeout = 0`, a
+  leftover from early experiments. BlueZ's default is 30 s (the file ships
+  it as the commented line `#TemporaryTimeout = 30`); with 0, bluetoothd
+  never forgets a device it has seen while discovering.
+- After 3.5 days bluetoothd held 1,795 device objects. `busctl tree
+  org.bluez` took 68 s, `bluetoothctl show` more than 90 s, and bluetoothd
+  used about 40% of the CPU while discovering. The other collector, with the
+  default, held no device objects between discovery cycles and answered in
+  under a second.
+- `g7-rig status` runs `bluetoothctl show` and took 136 s; the UI gives it
+  45 s, so it showed the collector as busy.
+- The Bluetooth watchdog also runs `bluetoothctl show`. Its unit hit its
+  start timeout on every run (`start operation timed out. Terminating.`)
+  and never acted; it only covered "discovering but nothing heard", not "bluetoothd
+  does not answer".
+- After restoring the default and `systemctl restart bluetooth`:
+  `bluetoothctl show` 0.8 s, `status` 16 s.
+
+What changed:
+
+- **`status` never waits on a helper:** every command it runs has a time
+  limit (systemctl 10 s, `bluetoothctl show` 10 s, journalctl 15 s,
+  vcgencmd 5 s). When `bluetoothctl show` does not answer, `status` still
+  answers, with `bluetooth_powered: null`, `sensor.central: null` and the
+  error line `bluetooth: no answer from bluetoothd in 10 s`; `health`
+  has `bluetooth_ms`, how long it took ([below](#health-in-g7-rig-status)).
+  With bluetoothd hung, `status` takes about 10 s more than usual; with
+  every helper hung, at most about 25 s plus Node's start. A command killed
+  at its limit now returns even when a child it started still holds its
+  output open.
+- **The Bluetooth watchdog restarts a bluetoothd that does not answer,**
+  warns about a long device list, and has a time limit on every helper
+  ([below](#the-bluetooth-watchdog)).
+- **`harden.sh` puts the setting back** (an active `TemporaryTimeout = 0`
+  becomes `#TemporaryTimeout = 30`), `update-readonly.sh` corrects the
+  card's copy, and `readonly.sh status` shows the value.
+
+The [2026-11-19 stall](#a-collector-that-stalled-2026-11-19) of the same
+collector was very probably the same thing.
+
+Verified here: the status and watchdog paths with a fake `exec` (a
+`bluetoothctl` that never answers, a slow one, every helper hung), the
+time-limited `exec` against real processes, the watchdog's decision as a
+unit test, `harden.sh`'s and `update-readonly.sh`'s `main.conf` edits and
+`readonly.sh status` on scratch files under sh and dash, `sh -n` of every
+script. Not verified without a device: `busctl --list tree` output and
+timing on a Pi, the watchdog under systemd (Nice=10, the 6 min start limit),
+a real restart of a bluetoothd that stopped answering, and the card
+correction on a read-only device.
+Verified on the devices: <to be filled in after deployment>
 
 ### The Bluetooth watchdog
 
 `g7-bt-watchdog.timer` (installed and enabled by `install.sh`) runs
-`g7-rig.js bt-watchdog` every 5 minutes at nice 19. When
-`bluetooth.service` is active and the adapter is powered and discovering,
-it counts "LE Advertising Report" / "LE Extended Advertising Report" lines
-in 10 s of `btmon` (under `timeout`). After 3 empty samples in a row it
-logs one line, runs `systemctl restart bluetooth` and then
-`g7-central-apply` (if installed) for the fleet address. At most one
-restart an hour; its state is in `/run/g7-rig/btwatch.json` (cleared at
-reboot). A failed `btmon` does not count as an empty sample. It logs
-nothing while advertisements are heard, a line per empty sample
-(`... (1 of 3)`), and on acting: `bt-watchdog: adapter discovering but no
-advertisements heard in 3 samples of 10 s; restarting bluetooth`.
+`g7-rig.js bt-watchdog` every 5 minutes at nice 10. It restarts
+Bluetooth for either of two reasons:
+
+- **Deaf adapter.** When `bluetooth.service` is active and the adapter is
+  powered and discovering, it counts "LE Advertising Report" / "LE Extended
+  Advertising Report" lines in 10 s of `btmon` (under `timeout`). After 3
+  empty samples in a row it restarts. A failed `btmon` does not count as an
+  empty sample.
+- **bluetoothd does not answer.** `bluetoothctl show` gets 15 s. No answer
+  in that time on 2 runs in a row (about 5 minutes apart) restarts. A
+  `bluetoothctl` that fails at once (e.g. no controller) is not a missed
+  answer, and any answer starts the count again.
+
+A restart is `systemctl restart bluetooth` and then `g7-central-apply` (if
+installed) for the fleet address. At most one restart an hour, for both
+reasons together; its state is in `/run/g7-rig/btwatch.json` (cleared at
+reboot).
+
+When bluetoothd answers, it also counts the device objects bluetoothd holds
+(`busctl --system --list tree org.bluez`, 5 s limit). Above 500, or when
+the listing does not finish in 5 s, it logs one warning an hour; it does
+not restart for that alone.
+
+It logs nothing while all is well. Otherwise (one line per run):
+
+```
+bt-watchdog: discovering but no advertisements heard in 10 s (1 of 3)
+bt-watchdog: adapter discovering but no advertisements heard in 3 samples of 10 s; restarting bluetooth
+bt-watchdog: still no advertisements; not restarting again yet (last restart 12 min ago, at most one per hour)
+bt-watchdog: bluetoothd did not answer in 15 s (1 of 2)
+bt-watchdog: bluetoothd not answering: restarting bluetooth
+bt-watchdog: bluetoothd still not answering; not restarting again yet (last restart 12 min ago, at most one per hour)
+bt-watchdog: WARNING: bluetoothd is tracking 1795 devices: check TemporaryTimeout in /etc/bluetooth/main.conf
+bt-watchdog: WARNING: bluetoothd could not list its devices in 5 s: check TemporaryTimeout in /etc/bluetooth/main.conf
+```
+
+Every helper it runs has a time limit (systemctl 10 s, `bluetoothctl show`
+15 s, busctl 5 s, btmon 20 s, the restart 100 s, `g7-central-apply`
+120 s). The longest path, a restart, adds up to 270 s; the unit's
+`TimeoutStartSec` is 6 minutes. It ran at nice 19 with idle I/O before
+2026-11-24; on a saturated single core that starved it, so it is now nice
+10 with low best-effort I/O.
+
+**Testing the no-answer path** (stops Bluetooth on that collector for up to
+about 10 minutes: no readings from it meanwhile; watch
+`journalctl -u g7-bt-watchdog.service -f` from a second SSH session):
+
+```sh
+sudo kill -STOP "$(systemctl show -p MainPID --value bluetooth)"   # freeze bluetoothd
+time bluetoothctl show            # hangs: Ctrl-C it
+sudo /opt/node/bin/node /usr/local/sbin/g7-rig.js status   # ~10 s; "bluetooth_powered":null, the error line
+```
+
+At the watchdog's next run: `bluetoothd did not answer in 15 s (1 of 2)`;
+at the run after (about 5 minutes later): `bluetoothd not answering:
+restarting bluetooth`, then `g7-central-apply`'s line (`Bluetooth address
+already ...` or `set to ...`). `systemctl restart` sends SIGTERM and
+SIGCONT, so the frozen bluetoothd exits normally. Then `bluetoothctl show`
+answers again and the Controller line is the fleet address. To end the test
+early: `sudo kill -CONT "$(systemctl show -p MainPID --value bluetooth)"`.
+If a restart happened in the hour before, the watchdog says `still not
+answering; not restarting again yet`: then resume it with `kill -CONT` or
+`sudo systemctl restart bluetooth && sudo /usr/local/sbin/g7-central-apply`.
 
 ### The alive watchdog
 
@@ -656,14 +794,19 @@ effect at the next boot.
 ```json
 "health": {"load1": 0.93, "mem_total_kb": 437312, "mem_available_kb": 262292,
            "swap_total_kb": 0, "swap_used_kb": 0, "overlay_used_kb": 1640,
-           "overlay_total_kb": 219136, "throttled": "0x0"}
+           "overlay_total_kb": 219136, "throttled": "0x0", "bluetooth_ms": 812}
 ```
 
 `load1` from `/proc/loadavg`; memory and swap in kB from `/proc/meminfo`
 (`swap_used_kb` = SwapTotal - SwapFree); `overlay_*` = kB used/total of the
 RAM overlay at `/media/root-rw` (null when the card is not read-only);
 `throttled` = what `vcgencmd get_throttled` prints (non-zero bits mean
-under-voltage or throttling, now or since boot; null without vcgencmd).
+under-voltage or throttling, now or since boot; null without vcgencmd);
+`bluetooth_ms` = how long `bluetoothctl show` took, in ms (null when it did
+not answer within its 10 s; then `bluetooth_powered` is null too and
+`errors` has `bluetooth: no answer from bluetoothd in 10 s`). A healthy
+collector answers in about a second; many seconds mean a struggling
+bluetoothd ([2026-11-24](#a-collector-that-stopped-answering-2026-11-24)).
 Any field that cannot be read is null; status never fails because of it.
 The only extra cost is one `vcgencmd` run and a statfs. The UI shows and
 logs it.
@@ -682,7 +825,10 @@ systemctl status g7-alive                                  # active (running)
 journalctl -u g7-alive -b         # "card check: one direct read from /dev/mmcblk0 every 30 s"
 systemctl show g7-alive -p WatchdogTimestamp               # at most 30 s old
 systemctl list-timers g7-bt-watchdog.timer g7-persist.timer
-journalctl -u g7-bt-watchdog.service --since -1h           # quiet unless it misses or restarts
+journalctl -u g7-bt-watchdog.service --since -1h           # quiet unless it misses, warns or restarts
+grep -n TemporaryTimeout /etc/bluetooth/main.conf          # only the commented #TemporaryTimeout = 30
+time bluetoothctl show >/dev/null                          # about a second
+sudo deploy/readonly.sh status    # "bluetooth TemporaryTimeout: 30 s (BlueZ default)"
 systemctl list-timers g7-netwatch.timer                    # next run within a minute
 cat /run/g7-netwatch/down                                  # 0 (minutes down in a row)
 journalctl -t g7-netwatch -b                               # nothing unless the network was down
@@ -739,8 +885,9 @@ with Lookout running and the card read-only, about 7 minutes after the freeze. A
 `update-readonly.sh` and a reboot both devices show `SwapTotal: 0 kB`, `g7-alive` active,
 no failed units, and `health` in `g7-rig status` with real figures (about 255 MB available,
 overlay 1-8 of 214 MB, `throttled` 0x0). Not verified: a real stall of the SD card or of
-userspace (only the frozen loop was tested), and whether this would have caught the
-2026-11-18 stall, whose cause is unknown.
+userspace (only the frozen loop was tested). It would not have caught the
+2026-11-18 stall, whose very probable cause (a bluetoothd too slow to answer,
+[2026-11-24](#a-collector-that-stopped-answering-2026-11-24)) left the device itself alive.
 
 ## 7. Troubleshooting
 
@@ -784,6 +931,27 @@ The UI tells two cases apart:
   marked busy, and leaves it out of sync until it answers. A Pi Zero in the
   middle of a failing read can be slow: this is not a frozen device.
 - **offline**: SSH fails, or times out and the SSH port does not answer.
+
+**A slow bluetoothd** is the first thing to check when a collector stays
+busy: `status` reports `bluetooth_powered: null` with the error line
+`bluetooth: no answer from bluetoothd in 10 s`, or a large
+`health.bluetooth_ms`. On the collector:
+
+```sh
+time bluetoothctl show                                  # about a second; tens of seconds = struggling
+busctl --system tree org.bluez | grep -c /dev_          # devices bluetoothd holds (connected ones count a few times); near 0 between scans
+grep TemporaryTimeout /etc/bluetooth/main.conf          # only the commented #TemporaryTimeout = 30
+journalctl -u g7-bt-watchdog.service -b                 # "did not answer", "tracking N devices"
+```
+
+An active `TemporaryTimeout = 0` (or a large value) makes bluetoothd keep
+every device it has seen. Fix: `sudo deploy/harden.sh` (puts an active 0
+back to `#TemporaryTimeout = 30`), then `sudo systemctl restart bluetooth`
+and `sudo /usr/local/sbin/g7-central-apply` (or reboot). On a read-only card
+also run `sudo deploy/update-readonly.sh` so the card's copy is corrected
+too, else the 0 comes back at the next boot. `sudo deploy/readonly.sh
+status` shows the value. A restart alone helps only until the list has
+grown again.
 
 A timeout alone does not mean the device is frozen. Before power-cycling,
 try a normal SSH login (`ssh pi@collector-a`, give it a minute) and look:
@@ -1009,9 +1177,10 @@ reading until they get the new key.
 - **Two collectors in range at once** (same key, same Bluetooth address) is
   not characterised: which one the sensor talks to, and whether they
   disturb each other.
-- **The cause of the 2026-11-18 stall is unknown**
-  ([section 6](#a-collector-that-stalled-2026-11-19)); the alive watchdog
-  is a safety net, not a fix.
+- **The cause of the 2026-11-18 stall is probable, not proven**
+  ([section 6](#a-collector-that-stalled-2026-11-19)): very probably the
+  unbounded BlueZ device list of [2026-11-24](#a-collector-that-stopped-answering-2026-11-24),
+  but that day's logs were lost. The alive watchdog is a safety net, not a fix.
 - **Untested** for the fleet tools: G5 and G6 transmitters, and Debian 10
   (buster) based rigs. Only Pi Zero W collectors on Raspberry Pi OS 13 have
   run them.

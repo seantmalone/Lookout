@@ -100,7 +100,8 @@ swap_off() {
 # - No zram either: about 255 MB is free in normal running, so swap buys
 #   little, and without it a runaway process is killed quickly instead of the
 #   device grinding. (A collector was once unresponsive for 31 hours, a few
-#   days after zram as large as RAM was enabled; the cause is unknown.)
+#   days after zram as large as RAM was enabled; the cause was very probably
+#   not swap but bluetoothd's unbounded device list, see deploy/README.md.)
 #   g7-alive.service reboots a device that stalls anyway.
 # Delete this file (on the card too) to go back to the default.
 [Main]
