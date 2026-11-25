@@ -702,6 +702,61 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('install.sh restarts Bluetooth only when needed', () => {
+    const decision = () => {
+      const m = /# bt-restart-decision: begin[^\n]*\n([\s\S]*?)# bt-restart-decision: end/.exec(read('install.sh'));
+      should.exist(m);
+      return m[1];
+    };
+    // runs the decision block with a stub systemctl and a scratch /proc
+    const decide = ({ changed, pid, cmdline }) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bt-restart-'));
+      try {
+        fs.mkdirSync(path.join(tmp, 'bin'));
+        const stub = path.join(tmp, 'bin', 'systemctl');
+        fs.writeFileSync(stub, pid === null ? '#!/bin/sh\nexit 1\n' : `#!/bin/sh\necho '${pid}'\n`);
+        fs.chmodSync(stub, 0o755);
+        if (cmdline !== undefined) {
+          fs.mkdirSync(path.join(tmp, 'proc', String(pid)), { recursive: true });
+          fs.writeFileSync(path.join(tmp, 'proc', String(pid), 'cmdline'), `${cmdline.join('\0')}\0`);
+        }
+        const r = spawnSync('/bin/sh', ['-euc', `${decision()}printf '%s' "$BT_REASON"`], {
+          encoding: 'utf8',
+          env: { PATH: `${path.join(tmp, 'bin')}:/usr/bin:/bin`, BT_DROPIN_CHANGED: changed ? '1' : '0', PROC_ROOT: path.join(tmp, 'proc') },
+        });
+        r.status.should.equal(0, r.stderr);
+        return r.stdout;
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    };
+    const GOOD = ['/usr/libexec/bluetooth/bluetoothd', '--noplugin=gap'];
+
+    it('drop-in changed: restart', () => {
+      decide({ changed: true, pid: 42, cmdline: GOOD }).should.equal('drop-in changed');
+    });
+    it('drop-in unchanged and bluetoothd has --noplugin=gap: no restart', () => {
+      decide({ changed: false, pid: 42, cmdline: GOOD }).should.equal('');
+    });
+    it('drop-in unchanged but bluetoothd runs without --noplugin=gap: restart', () => {
+      decide({ changed: false, pid: 42, cmdline: ['/usr/libexec/bluetooth/bluetoothd'] })
+        .should.equal('bluetoothd running without --noplugin=gap');
+    });
+    it('cannot tell (not running, systemctl fails, no cmdline): no restart', () => {
+      decide({ changed: false, pid: 0 }).should.equal('');
+      decide({ changed: false, pid: null }).should.equal('');
+      decide({ changed: false, pid: 42 }).should.equal('');
+    });
+    it('compares the drop-in before installing it; restarts only on a reason; reports it', () => {
+      const s = read('install.sh');
+      const cmp = s.indexOf('cmp -s "$HERE/systemd/bluetooth.service.d/g7.conf" "$BT_DROPIN"');
+      cmp.should.be.above(-1);
+      cmp.should.be.below(s.indexOf('install -m 644 "$HERE/systemd/bluetooth.service.d/g7.conf" "$BT_DROPIN"'));
+      s.should.not.match(/^systemctl restart bluetooth$/m);
+      s.should.match(/if \[ -n "\$BT_REASON" \]; then\n {2}systemctl restart bluetooth\n {2}BT_STATE="restarted \(\$BT_REASON\)"\nelse\n {2}BT_STATE="unchanged, not restarted"/);
+      s.should.match(/^echo "installed: .*bluetooth: \$BT_STATE"$/m);
+      s.indexOf('systemctl restart bluetooth').should.be.above(s.indexOf('systemctl daemon-reload'));
+    });
+  });
+
   describe('install.sh and Node under /opt/node', () => {
     it('warns when /opt/node/bin/node (what g7-rig-remote runs) is missing', () => {
       read('g7-rig-remote.sh').should.match(/NODE=\$\{G7RIG_NODE:-\/opt\/node\/bin\/node\}/);

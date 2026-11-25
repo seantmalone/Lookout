@@ -248,9 +248,13 @@ read-only (step 10) changes to the system last only until the next boot.
    and dependencies were first installed is not recorded.
 6. **`sudo deploy/install.sh`**: the units, the Bluetooth fix, g7-rig, the
    three watchdogs (Bluetooth, alive, network;
-   [table above](#what-is-installed-where)). It restarts `bluetooth` and
-   `g7-alive` and enables the network watchdog's timer, so there is nothing
-   else to do for them; it never restarts Lookout. Re-run it after every
+   [table above](#what-is-installed-where)). It restarts `g7-alive` and
+   enables the network watchdog's timer, so there is nothing else to do for
+   them; it never restarts Lookout. It restarts `bluetooth` only when the
+   `bluetooth.service.d/g7.conf` drop-in is new or changed, or when the
+   running bluetoothd was started without `--noplugin=gap`; its last line
+   says which (`bluetooth: restarted (drop-in changed)` or `bluetooth:
+   unchanged, not restarted`). Re-run it after every
    update (on a read-only card `update-readonly.sh` does).
 7. **The env file**: `sudoedit /etc/lookout.env`. Set `NIGHTSCOUT_HOST` and
    `API_SECRET`, and `LOOKOUT_ARGS` in this shape (the example has it; the
@@ -291,7 +295,7 @@ What takes effect when:
 
 | Change | Active |
 |---|---|
-| `install.sh` (units, g7-rig, watchdogs, Bluetooth fix) | at once (Lookout: after `systemctl restart lookout`) |
+| `install.sh` (units, g7-rig, watchdogs, Bluetooth fix) | at once (Lookout: after `systemctl restart lookout`; Bluetooth is restarted only when the drop-in changed or bluetoothd lacks `--noplugin=gap`) |
 | `/etc/lookout.env` | at the next Lookout restart |
 | `setup-g7rig-access.sh` | at once |
 | `harden.sh`: journald, apt timers, boot partition read-only | at once |
@@ -332,7 +336,13 @@ unlocks the card, copies them onto it, deletes the old swap file, the old
 overlay), drops the caches, relocks the card and checks byte for byte that
 the card has what was staged. Lookout's storage, the env file and
 `/etc/g7-central` are left to `g7-rig persist`. A reboot is needed only
-for a swap change. Not covered: `node_modules` (to change dependencies:
+for a swap change. An update does not restart Bluetooth unless the
+`bluetooth.service.d/g7.conf` drop-in changed (or bluetoothd runs without
+`--noplugin=gap`), so a sensor read in progress normally survives it; a
+Bluetooth restart drops the connection (Lookout logs `DBusError: Message
+recipient disconnected from message bus without replying`). Still do not
+update a collector during a pairing: the Lookout restart that follows, or a
+changed drop-in, would break it. Not covered: `node_modules` (to change dependencies:
 `readonly.sh disable --reboot`, `npm install`, `install.sh`,
 `readonly.sh enable --reboot`), the g7rig account, `harden.sh`'s changes
 under `/etc` other than the Wi-Fi power-save drop-in (which it copies to the

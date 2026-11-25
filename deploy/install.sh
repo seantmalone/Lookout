@@ -18,7 +18,11 @@ sed -e "s#@USER@#$USER_NAME#g" -e "s#@DIR@#$DIR#g" -e "s#@NODE_BIN@#$NODE_BIN#g"
   "$HERE/systemd/lookout.service" > /etc/systemd/system/lookout.service
 install -d /etc/systemd/system/lookout.service.d /etc/systemd/system/bluetooth.service.d
 install -m 644 "$HERE/systemd/lookout.service.d/priority.conf" /etc/systemd/system/lookout.service.d/priority.conf
-install -m 644 "$HERE/systemd/bluetooth.service.d/g7.conf" /etc/systemd/system/bluetooth.service.d/g7.conf
+# Bluetooth is restarted only when needed (a restart kills a sensor read or
+# pairing in progress): note whether the drop-in is new or changed
+BT_DROPIN=/etc/systemd/system/bluetooth.service.d/g7.conf
+if cmp -s "$HERE/systemd/bluetooth.service.d/g7.conf" "$BT_DROPIN"; then BT_DROPIN_CHANGED=0; else BT_DROPIN_CHANGED=1; fi
+install -m 644 "$HERE/systemd/bluetooth.service.d/g7.conf" "$BT_DROPIN"
 if [ ! -e /etc/lookout.env ]; then
   install -m 600 "$HERE/lookout.env.example" /etc/lookout.env
   echo "created /etc/lookout.env from the example: edit it before starting"
@@ -55,6 +59,26 @@ systemctl enable g7-alive.service >/dev/null 2>&1
 systemctl enable --now g7-netwatch.timer >/dev/null
 # a restart is a clean stop (not a failure) and runs the new script
 systemctl restart g7-alive.service
-systemctl restart bluetooth
+# bt-restart-decision: begin (BT_DROPIN_CHANGED in, BT_REASON out; PROC_ROOT for tests)
+BT_REASON=
+if [ "$BT_DROPIN_CHANGED" = 1 ]; then
+  BT_REASON="drop-in changed"
+else
+  BT_PID=$(systemctl show -p MainPID --value bluetooth 2>/dev/null || true)
+  case "$BT_PID" in
+    ''|0|*[!0-9]*) ;;  # not running or unknown: only a changed drop-in restarts
+    *) if [ -r "${PROC_ROOT:-/proc}/$BT_PID/cmdline" ] \
+         && ! tr '\0' '\n' < "${PROC_ROOT:-/proc}/$BT_PID/cmdline" | grep -qx -- '--noplugin=gap'; then
+         BT_REASON="bluetoothd running without --noplugin=gap"
+       fi ;;
+  esac
+fi
+# bt-restart-decision: end
+if [ -n "$BT_REASON" ]; then
+  systemctl restart bluetooth
+  BT_STATE="restarted ($BT_REASON)"
+else
+  BT_STATE="unchanged, not restarted"
+fi
 if [ "${1:-}" = "--enable" ]; then systemctl enable --now lookout; fi
-echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer, g7-alive.service, g7-netwatch.timer"
+echo "installed: lookout.service (+priority), bluetooth --noplugin=gap, g7-rig, g7-bt-watchdog.timer, g7-alive.service, g7-netwatch.timer; bluetooth: $BT_STATE"
