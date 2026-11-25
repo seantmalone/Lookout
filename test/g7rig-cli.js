@@ -93,6 +93,7 @@ describe('g7-rig CLI', () => {
       now: () => NOW,
       hostname: () => `rig-${name}`,
       uptime: () => 1234.5,
+      monotonic: () => 0, // a frozen clock: bluetooth_ms 0
       getuid: () => 1000,
       readFile: (f) => {
         if (!(f in procFiles)) throw new Error(`ENOENT: ${f}`);
@@ -169,6 +170,7 @@ describe('g7-rig CLI', () => {
         overlay_used_kb: 1640,
         overlay_total_kb: 219136,
         throttled: '0x0',
+        bluetooth_ms: 0,
       },
     });
   });
@@ -182,6 +184,7 @@ describe('g7-rig CLI', () => {
     overlay_used_kb: null,
     overlay_total_kb: null,
     throttled: null,
+    bluetooth_ms: null,
   };
 
   it('status health: vcgencmd (time-limited) is the only extra command', async () => {
@@ -221,7 +224,7 @@ describe('g7-rig CLI', () => {
     io.statfs = () => { throw new Error('EIO'); };
     (await run(['status'], io)).should.equal(0, err);
     const s = JSON.parse(out);
-    s.health.should.eql(NO_HEALTH);
+    s.health.should.eql({ ...NO_HEALTH, bluetooth_ms: 0 });
     s.uptime_s.should.equal(1234);
     s.sensor.code.should.equal('1234');
   });
@@ -231,7 +234,7 @@ describe('g7-rig CLI', () => {
     io.readFile = () => { throw new Error('EIO'); };
     io.statfs = () => { throw new Error('EIO'); };
     (await run(['status'], io)).should.equal(0, err);
-    JSON.parse(out).health.should.eql({ ...NO_HEALTH, throttled: '0x0' });
+    JSON.parse(out).health.should.eql({ ...NO_HEALTH, throttled: '0x0', bluetooth_ms: 0 });
   });
 
   it('status degrades when systemd, BlueZ and the journal are unavailable', async () => {
@@ -246,9 +249,86 @@ describe('g7-rig CLI', () => {
     (await run(['status'], io)).should.equal(0, err);
     const s = JSON.parse(out);
     s.lookout_active.should.equal(false);
-    s.bluetooth_powered.should.equal(false);
-    s.errors.should.eql([]);
+    should(s.bluetooth_powered).be.null(); // unknown, not off
+    s.errors.should.eql(['bluetooth: bluetoothctl show failed: not found']);
     should(s.version).be.null();
+  });
+
+  it('status: every command it runs has a time limit', async () => {
+    const a = fakeExec();
+    io = makeIo('a', a.exec);
+    (await run(['status'], io)).should.equal(0, err);
+    a.calls.length.should.be.above(3);
+    a.calls.forEach((c) => {
+      (typeof c.opts.timeoutMs).should.equal('number', c.line);
+      c.opts.timeoutMs.should.be.belowOrEqual(15000, c.line);
+    });
+    a.calls.find((c) => c.line === 'bluetoothctl show').opts.timeoutMs.should.equal(10000);
+  });
+
+  // a helper that never answers: the fake only returns at the limit it is
+  // given (scaled down 1000 times), as defaultExec does
+  const hanging = (lines) => {
+    const base = fakeExec();
+    const exec = (cmd, args = [], opts = {}) => {
+      const line = [cmd, ...args].join(' ');
+      if (!lines.includes(line)) return base.exec(cmd, args, opts);
+      base.calls.push({ line, opts });
+      return new Promise((resolve) => {
+        if (!opts.timeoutMs) return; // no limit: hangs, and the test times out
+        setTimeout(() => resolve({
+          code: 124, stdout: '', stderr: '', timedOut: true,
+        }), opts.timeoutMs / 1000);
+      });
+    };
+    return { exec, calls: base.calls };
+  };
+
+  it('status: bluetoothd does not answer in 10 s -> powered null, an error line, bluetooth_ms null', async () => {
+    io = makeIo('a', hanging(['bluetoothctl show']).exec);
+    (await run(['status'], io)).should.equal(0, err);
+    const s = JSON.parse(out);
+    should(s.bluetooth_powered).be.null();
+    s.errors.should.eql(['Error: sample failure', 'bluetooth: no answer from bluetoothd in 10 s']);
+    should(s.health.bluetooth_ms).be.null();
+    should(s.sensor.central).be.null();
+    // everything else as usual
+    s.lookout_active.should.equal(true);
+    s.sensor.key_fingerprint.should.equal(fingerprint(KEY));
+    s.health.throttled.should.equal('0x0');
+  });
+
+  it('status: still answers when every helper hangs', async () => {
+    io = makeIo('a', hanging([
+      'systemctl show lookout -p WorkingDirectory --value',
+      'systemctl is-active lookout',
+      'bluetoothctl show',
+      'journalctl -u lookout -o cat -n 300 --no-pager',
+      'vcgencmd get_throttled',
+    ]).exec);
+    (await run(['status'], io)).should.equal(0, err);
+    const s = JSON.parse(out);
+    s.lookout_active.should.equal(false);
+    should(s.bluetooth_powered).be.null();
+    s.errors.should.eql(['bluetooth: no answer from bluetoothd in 10 s']);
+    should(s.health.throttled).be.null();
+    s.sensor.code.should.equal('1234');
+  });
+
+  it('status: health.bluetooth_ms is how long bluetoothctl show took', async () => {
+    const a = fakeExec();
+    const exec = async (cmd, args = [], opts = {}) => {
+      const r = await a.exec(cmd, args, opts);
+      if ([cmd, ...args].join(' ') === 'bluetoothctl show') await new Promise((ok) => { setTimeout(ok, 60); });
+      return r;
+    };
+    io = makeIo('a', exec);
+    delete io.monotonic; // the real clock
+    (await run(['status'], io)).should.equal(0, err);
+    const s = JSON.parse(out);
+    s.health.bluetooth_ms.should.be.within(50, 1000);
+    s.bluetooth_powered.should.equal(true);
+    s.errors.should.eql(['Error: sample failure']);
   });
 
   it('status reads the journal at most every 5 minutes (cached errors)', async () => {
@@ -770,7 +850,7 @@ describe('g7-rig CLI', () => {
     s.lookout_active.should.equal(false);
     // the real readers: every health field present (null where this machine has no /proc etc.)
     Object.keys(s.health).should.eql(['load1', 'mem_total_kb', 'mem_available_kb', 'swap_total_kb',
-      'swap_used_kb', 'overlay_used_kb', 'overlay_total_kb', 'throttled']);
+      'swap_used_kb', 'overlay_used_kb', 'overlay_total_kb', 'throttled', 'bluetooth_ms']);
   });
 
   it('runs as a script: rejects a bad command with exit 2', () => {

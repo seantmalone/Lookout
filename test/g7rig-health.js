@@ -86,6 +86,7 @@ describe('g7-rig status health (lib/g7rig/health)', () => {
       meminfoText: MEMINFO.replace('218652', '0').replace('200000', '0'),
       overlayStatfs: { bsize: 4096, blocks: 54784, bfree: 54374 },
       throttledText: 'throttled=0x0\n',
+      bluetoothMs: 812.4,
     });
     JSON.stringify(h).should.equal(JSON.stringify({
       load1: 0.93,
@@ -96,7 +97,16 @@ describe('g7-rig status health (lib/g7rig/health)', () => {
       overlay_used_kb: 1640,
       overlay_total_kb: 219136,
       throttled: '0x0',
+      bluetooth_ms: 812,
     }));
+  });
+
+  it('bluetooth_ms: whole milliseconds, null when bluetoothctl did not finish', () => {
+    health.build({ bluetoothMs: 0 }).bluetooth_ms.should.equal(0);
+    health.build({ bluetoothMs: 68000.6 }).bluetooth_ms.should.equal(68001);
+    [null, undefined, -1, NaN, 'x'].forEach((v) => {
+      (health.build({ bluetoothMs: v }).bluetooth_ms === null).should.equal(true);
+    });
   });
 
   it('build with nothing readable: every field null', () => {
@@ -109,6 +119,7 @@ describe('g7-rig status health (lib/g7rig/health)', () => {
       overlay_used_kb: null,
       overlay_total_kb: null,
       throttled: null,
+      bluetooth_ms: null,
     });
   });
 });

@@ -86,6 +86,12 @@ describe('g7-rig status.build', () => {
     });
   });
 
+  it('bluetooth_powered: null when bluetoothd could not be asked (unknown, not off)', () => {
+    should(base(fullStorage(), { btPowered: null }).bluetooth_powered).be.null();
+    base(fullStorage(), { btPowered: false }).bluetooth_powered.should.equal(false);
+    base(fullStorage(), { btPowered: undefined }).bluetooth_powered.should.equal(false);
+  });
+
   it('never includes the key, anywhere', () => {
     const storage = fullStorage();
     assertNoKey(base(storage), KEY);

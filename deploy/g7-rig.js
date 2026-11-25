@@ -20,6 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { performance } = require('perf_hooks');
 
 // Relative to this file both in the repo (deploy/../lib) and when installed
 // (/usr/local/sbin/../lib = /usr/local/lib).
@@ -111,6 +112,7 @@ const realIo = () => ({
   now: () => Date.now(),
   hostname: () => os.hostname(),
   uptime: () => os.uptime(),
+  monotonic: () => performance.now(),
   getuid: () => (process.getuid ? process.getuid() : -1),
   readFile: (f) => fs.readFileSync(f, 'utf8'),
   statfs: (f) => fs.statfsSync(f),
@@ -118,8 +120,17 @@ const realIo = () => ({
 
 const lastLine = (text) => String(text || '').trim().split('\n').pop() || '';
 
+// Time limits for the helpers `status` (and the watchdog) run. The UI gives
+// `status` 45 s; with every helper hung, status takes SYSTEMCTL_MS (the
+// working directory) plus the longest of the parallel calls (JOURNAL_MS),
+// plus node's own start.
+const SYSTEMCTL_MS = 10000;
+const STATUS_BT_MS = 10000;
+const JOURNAL_MS = 15000;
+const VCGENCMD_MS = 5000;
+
 const lookoutDir = async (io) => {
-  const r = await io.exec('systemctl', ['show', 'lookout', '-p', 'WorkingDirectory', '--value']);
+  const r = await io.exec('systemctl', ['show', 'lookout', '-p', 'WorkingDirectory', '--value'], { timeoutMs: SYSTEMCTL_MS });
   const dir = r.code === 0 ? r.stdout.trim() : '';
   return dir && fs.existsSync(dir) ? dir : null;
 };
@@ -380,7 +391,7 @@ const recentErrorsCached = async (io) => {
   } catch (e) {
     // no cache yet, or unreadable: read the journal
   }
-  const journal = await io.exec('journalctl', ['-u', 'lookout', '-o', 'cat', '-n', '300', '--no-pager']);
+  const journal = await io.exec('journalctl', ['-u', 'lookout', '-o', 'cat', '-n', '300', '--no-pager'], { timeoutMs: JOURNAL_MS });
   const errors = journal.code === 0 ? status.recentErrors(journal.stdout) : [];
   try {
     fs.mkdirSync(cacheDir(io), { recursive: true, mode: 0o700 });
@@ -456,8 +467,9 @@ const btWatchdog = async (io) => {
   }
 };
 
-// status.health (lib/g7rig/health.js): /proc, a statfs of the RAM overlay and
-// `vcgencmd get_throttled`. Never fails: anything unreadable is null.
+// status.health (lib/g7rig/health.js): /proc, a statfs of the RAM overlay,
+// `vcgencmd get_throttled` and the time `bluetoothctl show` took. Never
+// fails: anything unreadable is null.
 const tryOr = (fn, fallback) => {
   try {
     return fn();
@@ -466,7 +478,7 @@ const tryOr = (fn, fallback) => {
   }
 };
 
-const readHealth = async (io, throttledRun) => {
+const readHealth = async (io, throttledRun, bluetoothMs) => {
   const text = (f) => tryOr(() => io.readFile(f), null);
   const mounted = health.isMounted(text('/proc/mounts'), health.OVERLAY_MOUNT);
   return tryOr(() => health.build({
@@ -474,7 +486,22 @@ const readHealth = async (io, throttledRun) => {
     meminfoText: text('/proc/meminfo'),
     overlayStatfs: mounted ? tryOr(() => io.statfs(health.OVERLAY_MOUNT), null) : null,
     throttledText: throttledRun && throttledRun.code === 0 ? throttledRun.stdout : null,
-  }), health.build({}));
+    bluetoothMs,
+  }), health.build({ bluetoothMs }));
+};
+
+const clock = (io) => io.monotonic || (() => performance.now());
+
+// `bluetoothctl show`, timed: {run, ms (null if it did not finish), error (or null)}
+const timedBtShow = async (io, timeoutMs) => {
+  const now = clock(io);
+  const t0 = now();
+  const run = await io.exec('bluetoothctl', ['show'], { timeoutMs });
+  if (run.timedOut) {
+    return { run, ms: null, error: `no answer from bluetoothd in ${Math.round(timeoutMs / 1000)} s` };
+  }
+  const error = run.code === 0 ? null : `bluetoothctl show failed: ${lastLine(run.stderr) || `exit ${run.code}`}`;
+  return { run, ms: now() - t0, error };
 };
 
 const LOCAL_COMMANDS = ['persist', 'bt-watchdog'];
@@ -491,26 +518,31 @@ const commands = {
   status: async (io) => {
     const dir = await lookoutDir(io);
     const storage = await readItems((await openStorage(io, dir)).store);
-    const [active, bt, errors, throttled] = await Promise.all([
-      io.exec('systemctl', ['is-active', 'lookout']),
-      io.exec('bluetoothctl', ['show']),
+    // every helper time-limited: a hung one must not hang status (the UI
+    // waits 45 s, then shows the collector as busy)
+    const [active, show, errors, throttled] = await Promise.all([
+      io.exec('systemctl', ['is-active', 'lookout'], { timeoutMs: SYSTEMCTL_MS }),
+      timedBtShow(io, STATUS_BT_MS),
       recentErrorsCached(io),
-      io.exec('vcgencmd', ['get_throttled'], { timeoutMs: 5000 }),
+      io.exec('vcgencmd', ['get_throttled'], { timeoutMs: VCGENCMD_MS }),
     ]);
+    const bt = show.run;
+    const answered = !show.error;
     const built = status.build({
       storage,
       envText: readEnv(io),
       lookoutActive: active.code === 0 && active.stdout.trim() === 'active',
-      btPowered: bt.code === 0 && /^\s*Powered:\s*yes\s*$/m.test(bt.stdout),
+      // null: unknown (bluetoothd did not answer), not off
+      btPowered: answered ? /^\s*Powered:\s*yes\s*$/m.test(bt.stdout) : null,
       now: io.now(),
       host: io.hostname(),
       uptimeS: io.uptime(),
       version: lookoutVersion(dir),
-      errors,
+      errors: [...errors, ...(answered ? [] : [`bluetooth: ${show.error}`])],
     });
     // the address this collector presents to the sensor
-    built.sensor.central = bt.code === 0 ? central.adapterAddress(bt.stdout) : null;
-    built.health = await readHealth(io, throttled);
+    built.sensor.central = answered ? central.adapterAddress(bt.stdout) : null;
+    built.health = await readHealth(io, throttled, show.ms);
     printJson(io, built);
   },
 
