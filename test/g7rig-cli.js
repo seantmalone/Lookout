@@ -7,7 +7,7 @@ const { spawnSync } = require('child_process');
 const persist = require('node-persist');
 const should = require('should');
 
-const { run } = require('../deploy/g7-rig');
+const { run, defaultExec } = require('../deploy/g7-rig');
 const { fingerprint } = require('../lib/g7rig/status');
 
 const ROOT = path.join(__dirname, '..');
@@ -776,5 +776,37 @@ describe('g7-rig CLI', () => {
   it('runs as a script: rejects a bad command with exit 2', () => {
     const r = spawnSync(process.execPath, [CLI, 'cat', '/etc/shadow'], { encoding: 'utf8' });
     r.status.should.equal(2);
+  });
+});
+
+describe('g7-rig exec (time limits on helpers)', () => {
+  it('runs a command and reports its exit code and output', async () => {
+    const r = await defaultExec('sh', ['-c', 'echo hi; echo err >&2; exit 3'], { timeoutMs: 5000 });
+    r.should.eql({
+      code: 3, stdout: 'hi\n', stderr: 'err\n', timedOut: false,
+    });
+  });
+
+  it('kills a command that runs past its limit: exit 124, timedOut, the output so far', async () => {
+    const t0 = Date.now();
+    const r = await defaultExec('sh', ['-c', 'echo partial; exec sleep 5'], { timeoutMs: 200 });
+    (Date.now() - t0).should.be.below(2000);
+    r.code.should.equal(124);
+    r.timedOut.should.equal(true);
+    r.stdout.should.equal('partial\n');
+  });
+
+  it('returns at the limit even when a grandchild still holds the output open', async () => {
+    // the killed shell leaves `sleep` behind with its stdout: "close" would wait for it
+    const t0 = Date.now();
+    const r = await defaultExec('sh', ['-c', 'sleep 3 & wait'], { timeoutMs: 200 });
+    (Date.now() - t0).should.be.below(1500);
+    r.timedOut.should.equal(true);
+  });
+
+  it('a missing command is exit 127, not a time-out', async () => {
+    const r = await defaultExec('no-such-command-g7rig', [], { timeoutMs: 5000 });
+    r.code.should.equal(127);
+    r.timedOut.should.equal(false);
   });
 });

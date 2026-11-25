@@ -48,25 +48,50 @@ const STORAGE_KEYS = ['id', 'sensorName', 'sensorKey', 'glucoseHist', 'sensorSee
 
 const fail = (message, exitCode = 1) => Object.assign(new Error(message), { exitCode });
 
-// exec(cmd, args, {input, env, timeoutMs}) -> {code, stdout, stderr}; never throws.
+// After a kill at the time limit, return at the latest this much later, even
+// if the process has not been reaped (e.g. stuck in the kernel).
+const KILL_GRACE_MS = 1000;
+
+// exec(cmd, args, {input, env, timeoutMs}) -> {code, stdout, stderr, timedOut};
+// never throws. A command still running at timeoutMs is killed and reported
+// as {code: 124, timedOut: true} (as timeout(1)), with the output so far.
 const defaultExec = (cmd, args = [], opts = {}) => new Promise((resolve) => {
   let stdout = '';
   let stderr = '';
   let child;
+  let settled = false;
+  let timedOut = false;
+  let grace = null;
   try {
     child = spawn(cmd, args, { env: opts.env || process.env, stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (e) {
-    resolve({ code: 127, stdout: '', stderr: e.message });
+    resolve({
+      code: 127, stdout: '', stderr: e.message, timedOut: false,
+    });
     return;
   }
+  const done = (r) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer); // eslint-disable-line no-use-before-define
+    clearTimeout(grace);
+    resolve({ ...r, timedOut });
+  };
+  const timeoutResult = () => ({ code: 124, stdout, stderr });
   // Our own timer: spawn's `timeout` option is left running when the command
   // is missing (ENOENT) and keeps the process alive.
-  const timer = setTimeout(() => child.kill('SIGKILL'), opts.timeoutMs || 120000);
-  const done = (r) => { clearTimeout(timer); resolve(r); };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+    grace = setTimeout(() => done(timeoutResult()), KILL_GRACE_MS);
+  }, opts.timeoutMs || 120000);
   child.stdout.on('data', (d) => { stdout += d; });
   child.stderr.on('data', (d) => { stderr += d; });
   child.on('error', (e) => done({ code: 127, stdout, stderr: stderr || e.message }));
-  child.on('close', (code) => done({ code: code === null ? 1 : code, stdout, stderr }));
+  // Once killed, return when it exits: "close" waits for every holder of its
+  // stdout/stderr, and a grandchild it left behind may keep them open.
+  child.on('exit', () => { if (timedOut) done(timeoutResult()); });
+  child.on('close', (code) => done(timedOut ? timeoutResult() : { code: code === null ? 1 : code, stdout, stderr }));
   child.stdin.on('error', () => {});
   child.stdin.end(opts.input || '');
 });
