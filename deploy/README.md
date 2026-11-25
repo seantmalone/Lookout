@@ -574,7 +574,17 @@ script. Not verified without a device: `busctl --list tree` output and
 timing on a Pi, the watchdog under systemd (Nice=10, the 6 min start limit),
 a real restart of a bluetoothd that stopped answering, and the card
 correction on a read-only device.
-Verified on the devices: <to be filled in after deployment>
+Verified on the devices (2026-11-24, two Pi Zero W collectors): on the affected collector,
+restoring the default and restarting Bluetooth took `bluetoothctl show` from more than 90 s
+to 0.8 s and `g7-rig status` from 136 s to 16 s; bluetoothd's device list fell from 1,795
+to 20, the UI saw the collector again, and it took a reading on its second cycle. After
+deploying the changes above: `status` takes 4 s and reports `bluetooth_ms` (404 ms);
+`harden.sh` and `readonly.sh status` report the default on both collectors. With bluetoothd
+frozen (`kill -STOP`), `status` returned in 17 s with `bluetooth_powered: null` and the
+error line; the watchdog, run by hand twice, logged "(1 of 2)" and then restarted
+Bluetooth, which came back with the fleet address. Not verified: the watchdog doing this
+from its timer (only by hand), the device-count warning on a real overgrown list, and
+`harden.sh` correcting a file that still has the 0 (the device was fixed by hand first).
 
 ### The Bluetooth watchdog
 
