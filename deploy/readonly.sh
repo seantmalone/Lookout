@@ -124,6 +124,41 @@ swap_status() {
   echo "swap in use: ${inuse:-none}"
 }
 
+# BlueZ's TemporaryTimeout (harden.sh step 7) as main.conf sets it, and the
+# card's copy when it differs. bluetoothd reads it when it starts.
+tt_value() {
+  sed -n 's/^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$1" 2>/dev/null | tail -n 1
+}
+tt_describe() {
+  case "$1" in
+    "") echo "30 s (BlueZ default)" ;;
+    0) echo "0 (devices are never forgotten: run deploy/harden.sh)" ;;
+    *) echo "$1 s" ;;
+  esac
+}
+bt_temporary_timeout_status() {
+  f=/etc/bluetooth/main.conf
+  [ -f "$f" ] || { echo "bluetooth TemporaryTimeout: no $f"; return 0; }
+  v=$(tt_value "$f")
+  echo "bluetooth TemporaryTimeout: $(tt_describe "$v")"
+  # changed since bluetoothd started? (GNU stat and date; skipped elsewhere)
+  started=$(systemctl show bluetooth -p ExecMainStartTimestamp --value 2>/dev/null || true)
+  if [ -n "$started" ]; then
+    s=$(date -d "$started" +%s 2>/dev/null || true)
+    m=$(stat -c %Y "$f" 2>/dev/null || true)
+    if [ -n "$s" ] && [ -n "$m" ] && [ "$m" -gt "$s" ]; then
+      echo "bluetooth: main.conf changed after bluetoothd started: sudo systemctl restart bluetooth (or reboot) to apply it"
+    fi
+  fi
+  if overlay_active && [ -f /media/root-ro/etc/bluetooth/main.conf ]; then
+    c=$(tt_value /media/root-ro/etc/bluetooth/main.conf)
+    if [ "$c" != "$v" ]; then
+      if [ "$c" = 0 ]; then echo "card's main.conf: TemporaryTimeout 0 (run deploy/update-readonly.sh)"
+      else echo "card's main.conf: TemporaryTimeout $(tt_describe "$c")"; fi
+    fi
+  fi
+}
+
 # The old swap file, while the card is still writable (before the overlay).
 # Never through the overlay: opening it there copies all of it into RAM.
 remove_swapfile_writable_card() {
@@ -202,6 +237,7 @@ case "$ACTION" in
     if overlay_active; then
       if [ -e /media/root-ro/var/swap ]; then echo "card swap file: present"; else echo "card swap file: none"; fi
     elif [ -e /var/swap ]; then echo "card swap file: present"; else echo "card swap file: none"; fi
+    bt_temporary_timeout_status
     ;;
   enable)
     mem=$(awk '/MemTotal/{print $2; exit}' /proc/meminfo)

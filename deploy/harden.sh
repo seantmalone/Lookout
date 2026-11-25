@@ -31,6 +31,14 @@
 #     the default up when they next reconnect or after a reboot. On a
 #     read-only card the file lands in RAM only: deploy/update-readonly.sh
 #     copies it onto the card.
+#  7. BlueZ forgets devices again: an active `TemporaryTimeout = 0` line in
+#     /etc/bluetooth/main.conf (left from experiments) becomes the shipped
+#     default line `#TemporaryTimeout = 30`. With 0, bluetoothd never forgets
+#     a device it saw while discovering: one collector held 1,795 after 3.5
+#     days, `bluetoothctl show` took more than 90 s and `g7-rig status` hung.
+#     Any other value is reported and left alone. Bluetooth is not
+#     restarted: `sudo systemctl restart bluetooth` (or a reboot) applies it.
+#     On a read-only card deploy/update-readonly.sh corrects the card's copy.
 #
 # Lookout and g7-rig already write their data crash-safely (temp file,
 # fsync, rename, fsync the directory), so after a power cut every item holds
@@ -173,3 +181,31 @@ if [ "$(findmnt -no FSTYPE / 2>/dev/null)" = overlay ]; then
   echo "Wi-Fi power save: the card is read-only; this change is in RAM until deploy/update-readonly.sh copies it onto the card"
 fi
 wifi_powersave_off || echo "Wi-Fi power save: could not write the NetworkManager drop-in" >&2
+
+# 7. BlueZ TemporaryTimeout: an active 0 back to the shipped default line
+# (any spacing; a commented line is not active)
+TT_SED='s/^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*0[[:space:]]*$/#TemporaryTimeout = 30/'
+bt_temporary_timeout() {
+  f=/etc/bluetooth/main.conf
+  [ -f "$f" ] || { echo "Bluetooth: $f not found; left unchanged"; return 0; }
+  v=$(sed -n 's/^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$f" | tail -n 1)
+  case "$v" in
+    "") echo "Bluetooth: TemporaryTimeout: not set in $f (BlueZ default: 30 s)" ;;
+    0)
+      # same mode and owner (cp -p), then an atomic replace
+      cp -p "$f" "$f.g7tmp" || return 1
+      sed "$TT_SED" "$f" > "$f.g7tmp" || { rm -f "$f.g7tmp"; return 1; }
+      mv -f "$f.g7tmp" "$f" || return 1
+      if grep -q '^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$f"; then
+        echo "Bluetooth: could not change TemporaryTimeout = 0 in $f" >&2
+        return 1
+      fi
+      echo "Bluetooth: TemporaryTimeout = 0 in $f (bluetoothd never forgets a device) replaced with the shipped default line '#TemporaryTimeout = 30' (30 s); takes effect after 'sudo systemctl restart bluetooth' or a reboot"
+      if [ "$(findmnt -no FSTYPE / 2>/dev/null)" = overlay ]; then
+        echo "Bluetooth: the card is read-only; this change to $f is in RAM until deploy/update-readonly.sh corrects the card's copy"
+      fi
+      ;;
+    *) echo "Bluetooth: TemporaryTimeout = $v in $f (not the default 30 s); left unchanged" ;;
+  esac
+}
+bt_temporary_timeout || echo "Bluetooth: could not check TemporaryTimeout in /etc/bluetooth/main.conf" >&2

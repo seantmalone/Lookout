@@ -7,6 +7,10 @@
 # (verified). Lookout's storage and the env file are left to g7-rig persist.
 # harden.sh's Wi-Fi power-save drop-in (/etc/NetworkManager/conf.d/
 # 90-g7-wifi-powersave.conf) is mirrored too, when it is there.
+# /etc/bluetooth/main.conf is a distro file and is not mirrored: when the
+# card's copy has an active `TemporaryTimeout = 0` and harden.sh has already
+# corrected the running system, the card's copy gets the same one-line
+# correction (to the shipped `#TemporaryTimeout = 30`), verified.
 # With rpi-swap set to no swap (readonly.sh units rewrites the drop-in, also
 # over the earlier zram-only one), it also deletes the old swap file from the
 # card itself (/media/root-ro/var/swap), never through the overlay. The swap
@@ -111,6 +115,26 @@ for p in $LAB_NETWATCH; do
   if [ -e "$p" ] || [ -L "$p" ]; then RM_LAB=yes; fi
 done
 
+# BlueZ's TemporaryTimeout (harden.sh step 7): the card's own main.conf with
+# the same one-line correction, staged here from the card itself. Only once
+# harden.sh has corrected the running system (else the running copy may
+# still be the card's, under the overlay). Decided before unlocking.
+TT_SED='s/^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*0[[:space:]]*$/#TemporaryTimeout = 30/'
+FIX_TT=no
+stage_bt_main_conf() {
+  c=$L/etc/bluetooth/main.conf
+  [ -f "$c" ] || return 0
+  grep -q '^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*0[[:space:]]*$' "$c" || return 0
+  if grep -q '^[[:space:]]*TemporaryTimeout[[:space:]]*=[[:space:]]*0[[:space:]]*$' /etc/bluetooth/main.conf 2>/dev/null; then
+    echo "Bluetooth: TemporaryTimeout = 0 in /etc/bluetooth/main.conf: run deploy/harden.sh, then this script again (the card's copy is left as it is)" >&2
+    return 0
+  fi
+  cp -p "$c" "$STAGE/bluetooth-main.conf"
+  sed "$TT_SED" "$c" > "$STAGE/bluetooth-main.conf"
+  FIX_TT=yes
+}
+stage_bt_main_conf
+
 mount -o remount,rw "$L"
 trap 'relock; rm -rf "$STAGE"' EXIT
 rsync -rlt "$STAGE/src/" "$L$SRC/"
@@ -129,6 +153,11 @@ fi
 if [ "$RM_OLD" = yes ]; then
   rm -f /media/root-ro/usr/local/sbin/g7-new-sensor
   drop_caches                          # a cached deleted file blocks the relock
+fi
+if [ "$FIX_TT" = yes ]; then
+  cp -p "$STAGE/bluetooth-main.conf" "$L/etc/bluetooth/main.conf.g7tmp"
+  mv -f "$L/etc/bluetooth/main.conf.g7tmp" "$L/etc/bluetooth/main.conf"
+  drop_caches                          # the replaced file, if the overlay cached it
 fi
 if [ "$RM_LAB" = yes ]; then
   rm -f /media/root-ro/usr/local/sbin/lab-netwatch
@@ -170,6 +199,13 @@ if [ "$RM_LAB" = yes ]; then
     if [ -e "$p" ] || [ -L "$p" ]; then echo "card still has $p" >&2; left=yes; bad=1; fi
   done
   [ $left = yes ] || echo "removed the old lab-netwatch from the card"
+fi
+if [ "$FIX_TT" = yes ]; then
+  if cmp -s "$STAGE/bluetooth-main.conf" "$L/etc/bluetooth/main.conf"; then
+    echo "Bluetooth: the card's /etc/bluetooth/main.conf now has the default '#TemporaryTimeout = 30' (was TemporaryTimeout = 0)"
+  else
+    echo "card differs: /etc/bluetooth/main.conf (TemporaryTimeout)" >&2; bad=1
+  fi
 fi
 rm -rf "$STAGE"
 [ $bad = 0 ] || exit 1

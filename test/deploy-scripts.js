@@ -200,6 +200,201 @@ describe('deploy scripts', () => {
     });
   });
 
+  describe('harden.sh: BlueZ TemporaryTimeout (an active 0 back to the shipped default)', () => {
+    const MAIN = '/etc/bluetooth/main.conf';
+    // a trimmed Raspberry Pi OS 13 / BlueZ 5.82 main.conf
+    const conf = (line) => ['[General]', '', '# How long to keep temporary devices around',
+      '# The value is in seconds. Default is 30.', '# 0 = disable timer, i.e. never keep temporary devices',
+      line, '', '#Experimental = false', '[Policy]', '#AutoEnable=true', ''].join('\n');
+    const DEFAULT = '#TemporaryTimeout = 30';
+    const fnText = (script, name) => {
+      const m = new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}$`, 'm').exec(read(script));
+      if (!m) throw new Error(`no ${name}() in ${script}`);
+      return m[0];
+    };
+    const ttSed = (script) => /^TT_SED='([^']*)'$/m.exec(read(script))[1];
+
+    // run harden.sh's bt_temporary_timeout against a scratch /etc/bluetooth
+    const run = (shell, content, mode = 0o644) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7-bluez-'));
+      try {
+        const file = path.join(tmp, MAIN);
+        if (content !== null) {
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, content, { mode });
+          fs.chmodSync(file, mode);
+        }
+        const text = fnText('harden.sh', 'bt_temporary_timeout').split('/etc/bluetooth/').join(`${tmp}/etc/bluetooth/`);
+        const r = spawnSync(shell, ['-c', `TT_SED='${ttSed('harden.sh')}'\n${text}\nbt_temporary_timeout`], { encoding: 'utf8' });
+        return {
+          status: r.status,
+          out: r.stdout + r.stderr,
+          conf: fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null,
+          mode: fs.existsSync(file) ? (fs.statSync(file).mode % 0o1000) : null,
+          left: fs.existsSync(path.dirname(file)) ? fs.readdirSync(path.dirname(file)) : [],
+        };
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    SHELLS.forEach((shell) => {
+      it(`replaces an active TemporaryTimeout = 0 with the shipped default line, and only that (${shell})`, () => {
+        ['TemporaryTimeout = 0', 'TemporaryTimeout=0', '  TemporaryTimeout =  0  '].forEach((line) => {
+          const r = run(shell, conf(line));
+          r.status.should.equal(0, r.out);
+          r.conf.should.equal(conf(DEFAULT));
+          r.out.should.match(/TemporaryTimeout = 0/);
+          r.out.should.match(/systemctl restart bluetooth/);
+          r.out.should.match(/reboot/);
+          r.left.should.eql(['main.conf']); // no temp file left behind
+        });
+      });
+
+      it(`keeps the file's mode, and a second run changes nothing (${shell})`, () => {
+        const r = run(shell, conf('TemporaryTimeout = 0'), 0o640);
+        r.mode.should.equal(0o640);
+        const again = run(shell, r.conf);
+        again.conf.should.equal(r.conf);
+        again.out.should.match(/TemporaryTimeout: not set .*default: 30 s/);
+      });
+
+      it(`leaves other values and commented lines alone, and reports them (${shell})`, () => {
+        const sixty = run(shell, conf('TemporaryTimeout = 60'));
+        sixty.conf.should.equal(conf('TemporaryTimeout = 60'));
+        sixty.out.should.match(/TemporaryTimeout = 60 .*left unchanged/);
+        sixty.out.should.not.match(/restart bluetooth/);
+        [conf('#TemporaryTimeout = 0'), conf(DEFAULT), conf('')].forEach((c) => {
+          const r = run(shell, c);
+          r.conf.should.equal(c);
+          r.out.should.match(/not set .*default: 30 s/);
+        });
+      });
+
+      it(`says so when there is no main.conf (${shell})`, () => {
+        const r = run(shell, null);
+        r.status.should.equal(0, r.out);
+        r.out.should.match(/not found; left unchanged/);
+      });
+    });
+
+    it('never restarts Bluetooth itself; harden.sh runs it, and says update-readonly.sh carries it to a read-only card', () => {
+      // (only in what it tells you to run)
+      const code = fnText('harden.sh', 'bt_temporary_timeout').split('\n').filter((l) => !/^\s*(#|echo )/.test(l)).join('\n');
+      code.should.not.match(/systemctl (restart|stop|start|reload)|service bluetooth|kill/);
+      const s = read('harden.sh');
+      // (only in what it tells you to run)
+      s.should.not.match(/^(?![^#]*echo )[^#]*systemctl \S+ bluetooth/m);
+      s.should.match(/^bt_temporary_timeout \|\| /m);
+      s.should.match(/^ {8}echo "Bluetooth: the card is read-only; [^\n]*update-readonly\.sh corrects the card's copy"$/m);
+    });
+
+    it('update-readonly.sh uses the same correction', () => {
+      ttSed('update-readonly.sh').should.equal(ttSed('harden.sh'));
+    });
+
+    it('update-readonly.sh corrects the card\'s copy only (not mirrored wholesale), inside the unlocked window, and verifies', () => {
+      const s = read('update-readonly.sh');
+      mirroredPaths().should.not.containEql(MAIN);
+      const decide = s.indexOf('FIX_TT=yes');
+      const stage = s.indexOf('"$STAGE/bluetooth-main.conf"');
+      const unlock = s.indexOf('mount -o remount,rw "$L"');
+      const write = s.indexOf('mv -f "$L/etc/bluetooth/main.conf.g7tmp" "$L/etc/bluetooth/main.conf"');
+      const relock = s.indexOf('\nrelock\n');
+      [decide, stage, write].forEach((i) => i.should.be.above(-1));
+      unlock.should.be.above(decide); // decided and staged before unlocking
+      unlock.should.be.above(stage);
+      write.should.be.above(unlock);
+      relock.should.be.above(write);
+      s.indexOf('cmp -s "$STAGE/bluetooth-main.conf" "$L/etc/bluetooth/main.conf"', relock).should.be.above(relock);
+    });
+
+    // update-readonly.sh's decision and staging, against a scratch card and running system
+    const stageFn = () => fnText('update-readonly.sh', 'stage_bt_main_conf');
+    const runStage = (card, running) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7-bluez-card-'));
+      try {
+        const put = (p, c) => {
+          if (c === null) return;
+          fs.mkdirSync(path.dirname(path.join(tmp, p)), { recursive: true });
+          fs.writeFileSync(path.join(tmp, p), c);
+        };
+        put('/card/etc/bluetooth/main.conf', card);
+        put('/etc/bluetooth/main.conf', running);
+        fs.mkdirSync(path.join(tmp, 'stage'));
+        const text = stageFn().split('$L/etc/bluetooth/').join('@CARD@')
+          .split('/etc/bluetooth/')
+          .join(`${tmp}/etc/bluetooth/`)
+          .split('@CARD@')
+          .join(`${tmp}/card/etc/bluetooth/`);
+        const r = spawnSync('/bin/sh', ['-c', `TT_SED='${ttSed('update-readonly.sh')}'\nSTAGE=${tmp}/stage\nFIX_TT=no\n${text}\nstage_bt_main_conf\necho "FIX_TT=$FIX_TT"`], { encoding: 'utf8' });
+        const staged = path.join(tmp, 'stage', 'bluetooth-main.conf');
+        return {
+          status: r.status,
+          out: r.stdout + r.stderr,
+          staged: fs.existsSync(staged) ? fs.readFileSync(staged, 'utf8') : null,
+        };
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    };
+
+    it('update-readonly.sh: card has 0, running system corrected (harden.sh ran) -> stages the card\'s copy with the one line fixed', () => {
+      const card = conf('TemporaryTimeout = 0').replace('#AutoEnable=true', '#AutoEnable=true\n# a line only the card has');
+      const r = runStage(card, conf(DEFAULT));
+      r.status.should.equal(0, r.out);
+      r.out.should.match(/FIX_TT=yes/);
+      r.staged.should.equal(card.replace('TemporaryTimeout = 0', DEFAULT));
+    });
+
+    it('update-readonly.sh: nothing to do when the card is fine; asks for harden.sh first when the running system still has 0', () => {
+      const fine = runStage(conf(DEFAULT), conf(DEFAULT));
+      fine.out.should.match(/FIX_TT=no/);
+      should(fine.staged).be.null();
+      const notHardened = runStage(conf('TemporaryTimeout = 0'), conf('TemporaryTimeout = 0'));
+      notHardened.out.should.match(/FIX_TT=no/);
+      notHardened.out.should.match(/run deploy\/harden\.sh/);
+      should(notHardened.staged).be.null();
+      runStage(null, null).out.should.match(/FIX_TT=no/);
+    });
+
+    it('readonly.sh status shows the value in use (running system and card)', () => {
+      const fn = ['tt_value', 'tt_describe', 'bt_temporary_timeout_status'].map((n) => fnText('readonly.sh', n)).join('\n');
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'g7-bluez-st-'));
+      try {
+        const runIt = (running, card) => {
+          [['/etc/bluetooth/main.conf', running], ['/media/root-ro/etc/bluetooth/main.conf', card]].forEach(([p, c]) => {
+            const f = path.join(tmp, p);
+            fs.rmSync(f, { force: true });
+            if (c === null) return;
+            fs.mkdirSync(path.dirname(f), { recursive: true });
+            fs.writeFileSync(f, c);
+          });
+          const text = fn.split('/media/root-ro/etc/bluetooth/').join('@CARD@')
+            .split('/etc/bluetooth/').join(`${tmp}/etc/bluetooth/`)
+            .split('@CARD@')
+            .join(`${tmp}/media/root-ro/etc/bluetooth/`);
+          // no overlay helper here: say the overlay is active, so the card is read too
+          const r = spawnSync('/bin/sh', ['-c', `overlay_active() { true; }\n${text}\nbt_temporary_timeout_status`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+          r.status.should.equal(0, r.stderr);
+          return r.stdout;
+        };
+        runIt(conf(DEFAULT), conf(DEFAULT)).should.startWith('bluetooth TemporaryTimeout: 30 s (BlueZ default)\n');
+        runIt(conf('TemporaryTimeout = 0'), conf('TemporaryTimeout = 0'))
+          .should.match(/^bluetooth TemporaryTimeout: 0 \(devices are never forgotten: run deploy\/harden\.sh\)\n/);
+        runIt(conf('TemporaryTimeout = 60'), conf('TemporaryTimeout = 60')).should.startWith('bluetooth TemporaryTimeout: 60 s\n');
+        runIt(conf(DEFAULT), conf('TemporaryTimeout = 0'))
+          .should.match(/card's main\.conf: TemporaryTimeout 0 \(run deploy\/update-readonly\.sh\)/);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('readonly.sh runs it from status', () => {
+      /^ {2}status\)\n[\s\S]*?bt_temporary_timeout_status[\s\S]*?;;/m.test(read('readonly.sh')).should.equal(true);
+    });
+  });
+
   describe('swap on a read-only card (rpi-swap: Mechanism=none, no swap at all)', () => {
     const DROPIN = '/etc/rpi/swap.conf.d/90-g7-readonly.conf';
     const readonly = () => read('readonly.sh');
